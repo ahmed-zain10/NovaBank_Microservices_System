@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://claude.ai/chat/46fc6b13-57bd-4de2-b859-ec216c2a84cb
+HostUrl=https://claude.ai/api/organizations/fd7f8a2b-33a2-4232-9853-afe3f335a087/conversations/46fc6b13-57bd-4de2-b859-ec216c2a84cb/wiggle/download-file?path=%2Fmnt%2Fuser-data%2Foutputs%2Fnovabank_v2.2_final.zip

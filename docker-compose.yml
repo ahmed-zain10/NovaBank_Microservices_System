@@ -1,0 +1,195 @@
+services:
+
+  nginx:
+    image: nginx:alpine
+    container_name: nova-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  frontend-customers:
+    build: ./services/frontend-customers
+    container_name: nova-customers
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  frontend-teller:
+    build: ./services/frontend-teller
+    container_name: nova-teller
+    ports:
+      - "3001:80"
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: nova-api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - AUTH_URL=http://auth-service:8001
+      - ACCOUNTS_URL=http://accounts-service:8002
+      - TRANSACTIONS_URL=http://transactions-service:8003
+      - NOTIFICATIONS_URL=http://notifications-service:8004
+      - JWT_SECRET=nova-bank-jwt-secret-2025
+    depends_on:
+      - auth-service
+      - accounts-service
+      - transactions-service
+      - notifications-service
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  auth-service:
+    build: ./services/auth-service
+    container_name: nova-auth
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://nova:secret@auth-db:5432/auth_db
+      - JWT_SECRET=nova-bank-jwt-secret-2025
+      - ACCOUNTS_URL=http://accounts-service:8002
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  auth-db:
+    image: postgres:15-alpine
+    container_name: nova-auth-db
+    environment:
+      - POSTGRES_USER=nova
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=auth_db
+    volumes:
+      - auth_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nova -d auth_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  accounts-service:
+    build: ./services/accounts-service
+    container_name: nova-accounts
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://nova:secret@accounts-db:5432/accounts_db
+      - NOTIFICATIONS_URL=http://notifications-service:8004
+    depends_on:
+      accounts-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  accounts-db:
+    image: postgres:15-alpine
+    container_name: nova-accounts-db
+    environment:
+      - POSTGRES_USER=nova
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=accounts_db
+    volumes:
+      - accounts_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nova -d accounts_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  transactions-service:
+    build: ./services/transactions-service
+    container_name: nova-transactions
+    ports:
+      - "8003:8003"
+    environment:
+      - DATABASE_URL=postgresql://nova:secret@transactions-db:5432/transactions_db
+      - ACCOUNTS_URL=http://accounts-service:8002
+      - NOTIFICATIONS_URL=http://notifications-service:8004
+    depends_on:
+      transactions-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  transactions-db:
+    image: postgres:15-alpine
+    container_name: nova-transactions-db
+    environment:
+      - POSTGRES_USER=nova
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=transactions_db
+    volumes:
+      - transactions_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nova -d transactions_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  notifications-service:
+    build: ./services/notifications-service
+    container_name: nova-notifications
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql://nova:secret@notifications-db:5432/notifications_db
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+  notifications-db:
+    image: postgres:15-alpine
+    container_name: nova-notifications-db
+    environment:
+      - POSTGRES_USER=nova
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=notifications_db
+    volumes:
+      - notifications_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nova -d notifications_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - nova-network
+
+volumes:
+  auth_data:
+  accounts_data:
+  transactions_data:
+  notifications_data:
+
+networks:
+  nova-network:
+    driver: bridge
