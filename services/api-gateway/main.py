@@ -7,7 +7,9 @@ from jose import jwt, JWTError
 import httpx
 from collections import defaultdict
 
-JWT_SECRET        = os.getenv("JWT_SECRET","nova-bank-jwt-secret-2025")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET env var is required — set it via AWS Secrets Manager")
 JWT_ALGO          = "HS256"
 AUTH_URL          = os.getenv("AUTH_URL",          "http://auth-service:8001")
 ACCOUNTS_URL      = os.getenv("ACCOUNTS_URL",      "http://accounts-service:8002")
@@ -19,7 +21,12 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="API Gateway")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",") if o.strip()]
+app.add_middleware(CORSMiddleware,
+    allow_origins=_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"])
 
 _rl: dict = defaultdict(list)
 def rate_limit(key, limit=60, window=60):

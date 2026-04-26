@@ -1,22 +1,34 @@
 """Nova Bank — Transactions Service :8003"""
-import os, uuid, logging, time
-import psycopg2, psycopg2.extras, httpx
+import os, uuid, logging, time, json
+import psycopg2, psycopg2.extras, httpx, boto3
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 
-DB_URL            = os.getenv("DATABASE_URL")
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL env var is required — injected by ECS entrypoint from Secrets Manager")
 ACCOUNTS_URL      = os.getenv("ACCOUNTS_URL","http://accounts-service:8002")
 NOTIFICATIONS_URL = os.getenv("NOTIFICATIONS_URL","http://notifications-service:8004")
 
 RATES = {"EGP":1,"USD":0.0204,"EUR":0.0188,"GBP":0.016,"SAR":0.0765,"AED":0.0749,"KWD":0.00626}
+
+AWS_REGION    = os.getenv("AWS_REGION", "us-east-1")
+SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "")
+sqs_client    = boto3.client("sqs", region_name=AWS_REGION)
 
 logging.basicConfig(level=logging.INFO,
   format='{"t":"%(asctime)s","svc":"transactions","msg":"%(message)s"}')
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Transactions Service")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS: internal services only talk to api-gateway, not browser directly
+# api-gateway handles CORS for public-facing routes
+app.add_middleware(CORSMiddleware,
+    allow_origins=[os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allow_headers=["Authorization", "Content-Type"])
 
 def conn():
     return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
@@ -82,7 +94,24 @@ def call_accounts(method, path, body=None):
     except HTTPException: raise
     except Exception as e: raise HTTPException(503, f"accounts-service error: {e}")
 
-def notify(uid, title, body_text, ntype="transaction"):
+def notify(uid, title, body_text, ntype="transaction", phone=None, email=None):
+    """Send notification via SQS (preferred) or HTTP fallback"""
+    if SQS_QUEUE_URL:
+        try:
+            msg = {"user_id": uid, "title": title, "body": body_text, "type": ntype}
+            if phone:
+                msg["phone"] = phone
+            if email:
+                msg["email"] = email
+            sqs_client.send_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MessageBody=json.dumps(msg, ensure_ascii=False)
+            )
+            log.info(f"Notification queued via SQS for user {uid}")
+            return
+        except Exception as e:
+            log.warning(f"SQS failed, falling back to HTTP: {e}")
+    # HTTP fallback
     try:
         httpx.post(f"{NOTIFICATIONS_URL}/internal/create",
                    json={"user_id":uid,"title":title,"body":body_text,"type":ntype},timeout=3)
@@ -149,7 +178,9 @@ def deposit(data: dict):
     try:
         acc_info = call_accounts("GET", f"/accounts/{acc_id}")
         if acc_info and acc_info.get("user_id"):
-            notify(str(acc_info["user_id"]), "💵 إيداع ناجح", f"تم إيداع {amt:.2f} EGP في حسابك. الرصيد: {new_bal:.2f} EGP")
+            notify(str(acc_info["user_id"]), "💵 إيداع ناجح",
+                   f"تم إيداع {amt:.2f} EGP في حسابك. الرصيد: {new_bal:.2f} EGP",
+                   phone=acc_info.get("phone"), email=acc_info.get("email"))
     except: pass
     return {"ok":True,"newBalance":new_bal,"transaction":tx}
 
@@ -183,7 +214,9 @@ def withdraw(data: dict):
     try:
         acc_info = call_accounts("GET", f"/accounts/{acc_id}")
         if acc_info and acc_info.get("user_id"):
-            notify(str(acc_info["user_id"]), "💸 سحب ناجح", f"تم سحب {amt:.2f} EGP من حسابك. الرصيد: {new_bal:.2f} EGP")
+            notify(str(acc_info["user_id"]), "💸 سحب ناجح",
+                   f"تم سحب {amt:.2f} EGP من حسابك. الرصيد: {new_bal:.2f} EGP",
+                   phone=acc_info.get("phone"), email=acc_info.get("email"))
     except: pass
     return {"ok":True,"newBalance":new_bal,"transaction":tx}
 

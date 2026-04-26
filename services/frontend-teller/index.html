@@ -1013,7 +1013,7 @@ option { background:var(--bg3); }
 // ════════════════════════════════════
 //  CONFIG & API
 // ════════════════════════════════════
-const API_BASE = 'http://localhost:8000';
+const API_BASE = '';  // Relative path — nginx proxies /api/* to api-gateway
 
 const EMP_TOKEN = {
   get()   { return sessionStorage.getItem('nova_emp_token'); },

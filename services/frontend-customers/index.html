@@ -1750,7 +1750,7 @@
 <script>
 // ============================== DATABASE ==============================
 // ====== Nova Bank v3 — API Layer ======
-const API = 'http://localhost:8000';
+const API = '';  // Relative path — nginx proxies /api/* to api-gateway
 const TOKEN = {
   get()   { return sessionStorage.getItem('nova_token'); },
   set(t)  { sessionStorage.setItem('nova_token', t); },

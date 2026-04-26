@@ -1,195 +1,202 @@
+###############################################################################
+# NovaBank – Local Development docker-compose
+# Usage: docker-compose up --build
+# All services run locally; DB credentials via .env file (see .env.example)
+###############################################################################
+
+version: "3.9"
+
 services:
 
-  nginx:
-    image: nginx:alpine
-    container_name: nova-nginx
-    ports:
-      - "8080:80"
-    volumes:
-      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - api-gateway
-    restart: unless-stopped
-    networks:
-      - nova-network
-
-  frontend-customers:
-    build: ./services/frontend-customers
-    container_name: nova-customers
-    ports:
-      - "3000:80"
-    restart: unless-stopped
-    networks:
-      - nova-network
-
-  frontend-teller:
-    build: ./services/frontend-teller
-    container_name: nova-teller
-    ports:
-      - "3001:80"
-    restart: unless-stopped
-    networks:
-      - nova-network
-
-  api-gateway:
-    build: ./services/api-gateway
-    container_name: nova-api-gateway
-    ports:
-      - "8000:8000"
+  # ── PostgreSQL (single instance, 4 schemas like RDS) ─────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: novabank-postgres
     environment:
-      - AUTH_URL=http://auth-service:8001
-      - ACCOUNTS_URL=http://accounts-service:8002
-      - TRANSACTIONS_URL=http://transactions-service:8003
-      - NOTIFICATIONS_URL=http://notifications-service:8004
-      - JWT_SECRET=nova-bank-jwt-secret-2025
-    depends_on:
-      - auth-service
-      - accounts-service
-      - transactions-service
-      - notifications-service
-    restart: unless-stopped
+      POSTGRES_DB: novabank
+      POSTGRES_USER: ${POSTGRES_USER:-novabank_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-schemas.sql:/docker-entrypoint-initdb.d/init-schemas.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-novabank_admin} -d novabank"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
-      - nova-network
+      - novabank-net
 
+  # ── Auth Service :8001 ─────────────────────────────────────────────────────
   auth-service:
-    build: ./services/auth-service
-    container_name: nova-auth
+    build:
+      context: ./services/auth-service
+    container_name: novabank-auth
+    environment:
+      DATABASE_URL: postgresql://auth_user:${AUTH_DB_PASSWORD:-auth_local_pass}@postgres:5432/novabank?options=-csearch_path%3Dauth,public
+      JWT_SECRET: ${JWT_SECRET:-local-jwt-secret-dev-only-change-in-prod}
+      ACCOUNTS_URL: http://accounts-service:8002
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
     ports:
       - "8001:8001"
-    environment:
-      - DATABASE_URL=postgresql://nova:secret@auth-db:5432/auth_db
-      - JWT_SECRET=nova-bank-jwt-secret-2025
-      - ACCOUNTS_URL=http://accounts-service:8002
     depends_on:
-      auth-db:
+      postgres:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - nova-network
-
-  auth-db:
-    image: postgres:15-alpine
-    container_name: nova-auth-db
-    environment:
-      - POSTGRES_USER=nova
-      - POSTGRES_PASSWORD=secret
-      - POSTGRES_DB=auth_db
-    volumes:
-      - auth_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nova -d auth_db"]
-      interval: 5s
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
       timeout: 5s
-      retries: 10
-    restart: unless-stopped
+      retries: 5
+      start_period: 30s
     networks:
-      - nova-network
+      - novabank-net
+    restart: unless-stopped
 
+  # ── Accounts Service :8002 ─────────────────────────────────────────────────
   accounts-service:
-    build: ./services/accounts-service
-    container_name: nova-accounts
+    build:
+      context: ./services/accounts-service
+    container_name: novabank-accounts
+    environment:
+      DATABASE_URL: postgresql://accounts_user:${ACCOUNTS_DB_PASSWORD:-accounts_local_pass}@postgres:5432/novabank?options=-csearch_path%3Daccounts,public
+      NOTIFICATIONS_URL: http://notifications-service:8004
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
     ports:
       - "8002:8002"
-    environment:
-      - DATABASE_URL=postgresql://nova:secret@accounts-db:5432/accounts_db
-      - NOTIFICATIONS_URL=http://notifications-service:8004
     depends_on:
-      accounts-db:
+      postgres:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - nova-network
-
-  accounts-db:
-    image: postgres:15-alpine
-    container_name: nova-accounts-db
-    environment:
-      - POSTGRES_USER=nova
-      - POSTGRES_PASSWORD=secret
-      - POSTGRES_DB=accounts_db
-    volumes:
-      - accounts_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nova -d accounts_db"]
-      interval: 5s
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
       timeout: 5s
-      retries: 10
-    restart: unless-stopped
+      retries: 5
+      start_period: 30s
     networks:
-      - nova-network
+      - novabank-net
+    restart: unless-stopped
 
+  # ── Transactions Service :8003 ─────────────────────────────────────────────
   transactions-service:
-    build: ./services/transactions-service
-    container_name: nova-transactions
+    build:
+      context: ./services/transactions-service
+    container_name: novabank-transactions
+    environment:
+      DATABASE_URL: postgresql://transactions_user:${TRANSACTIONS_DB_PASSWORD:-transactions_local_pass}@postgres:5432/novabank?options=-csearch_path%3Dtransactions,public
+      ACCOUNTS_URL: http://accounts-service:8002
+      NOTIFICATIONS_URL: http://notifications-service:8004
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
     ports:
       - "8003:8003"
-    environment:
-      - DATABASE_URL=postgresql://nova:secret@transactions-db:5432/transactions_db
-      - ACCOUNTS_URL=http://accounts-service:8002
-      - NOTIFICATIONS_URL=http://notifications-service:8004
     depends_on:
-      transactions-db:
+      postgres:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - nova-network
-
-  transactions-db:
-    image: postgres:15-alpine
-    container_name: nova-transactions-db
-    environment:
-      - POSTGRES_USER=nova
-      - POSTGRES_PASSWORD=secret
-      - POSTGRES_DB=transactions_db
-    volumes:
-      - transactions_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nova -d transactions_db"]
-      interval: 5s
+      test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
+      interval: 10s
       timeout: 5s
-      retries: 10
-    restart: unless-stopped
+      retries: 5
+      start_period: 30s
     networks:
-      - nova-network
+      - novabank-net
+    restart: unless-stopped
 
+  # ── Notifications Service :8004 ────────────────────────────────────────────
   notifications-service:
-    build: ./services/notifications-service
-    container_name: nova-notifications
+    build:
+      context: ./services/notifications-service
+    container_name: novabank-notifications
+    environment:
+      DATABASE_URL: postgresql://notifications_user:${NOTIFICATIONS_DB_PASSWORD:-notifications_local_pass}@postgres:5432/novabank?options=-csearch_path%3Dnotifications,public
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
     ports:
       - "8004:8004"
-    environment:
-      - DATABASE_URL=postgresql://nova:secret@notifications-db:5432/notifications_db
     depends_on:
-      notifications-db:
+      postgres:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - nova-network
-
-  notifications-db:
-    image: postgres:15-alpine
-    container_name: nova-notifications-db
-    environment:
-      - POSTGRES_USER=nova
-      - POSTGRES_PASSWORD=secret
-      - POSTGRES_DB=notifications_db
-    volumes:
-      - notifications_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nova -d notifications_db"]
-      interval: 5s
+      test: ["CMD-SHELL", "curl -sf http://localhost:8004/health || exit 1"]
+      interval: 10s
       timeout: 5s
-      retries: 10
-    restart: unless-stopped
+      retries: 5
+      start_period: 30s
     networks:
-      - nova-network
+      - novabank-net
+    restart: unless-stopped
+
+  # ── API Gateway :8000 ──────────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+    container_name: novabank-gateway
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-local-jwt-secret-dev-only-change-in-prod}
+      AUTH_URL: http://auth-service:8001
+      ACCOUNTS_URL: http://accounts-service:8002
+      TRANSACTIONS_URL: http://transactions-service:8003
+      NOTIFICATIONS_URL: http://notifications-service:8004
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173,http://localhost:8080,http://localhost:8081}
+    ports:
+      - "8000:8000"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      accounts-service:
+        condition: service_healthy
+      transactions-service:
+        condition: service_healthy
+      notifications-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - novabank-net
+    restart: unless-stopped
+
+  # ── Frontend Customers :8080 ───────────────────────────────────────────────
+  frontend-customers:
+    build:
+      context: ./services/frontend-customers
+    container_name: novabank-frontend-customers
+    ports:
+      - "8080:80"
+    depends_on:
+      - api-gateway
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - novabank-net
+    restart: unless-stopped
+
+  # ── Frontend Teller :8081 ──────────────────────────────────────────────────
+  frontend-teller:
+    build:
+      context: ./services/frontend-teller
+    container_name: novabank-frontend-teller
+    ports:
+      - "8081:80"
+    depends_on:
+      - api-gateway
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - novabank-net
+    restart: unless-stopped
 
 volumes:
-  auth_data:
-  accounts_data:
-  transactions_data:
-  notifications_data:
+  postgres_data:
 
 networks:
-  nova-network:
+  novabank-net:
     driver: bridge

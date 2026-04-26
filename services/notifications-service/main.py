@@ -1,16 +1,31 @@
 """Nova Bank — Notifications Service :8004"""
-import os, logging, time
+import os, logging, time, json, threading
 import psycopg2, psycopg2.extras
+import boto3
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL env var is required")
+
+AWS_REGION    = os.getenv("AWS_REGION", "us-east-1")
+SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "")
+SES_SENDER    = os.getenv("SES_SENDER", "ahmedhassana3063850z@gmail.com")
+
 logging.basicConfig(level=logging.INFO,
   format='{"t":"%(asctime)s","svc":"notifications","msg":"%(message)s"}')
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Notifications Service")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware,
+    allow_origins=[os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allow_headers=["Authorization", "Content-Type"])
+
+sqs = boto3.client("sqs", region_name=AWS_REGION)
+ses = boto3.client("ses", region_name=AWS_REGION)
 
 def conn():
     return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
@@ -38,12 +53,109 @@ def row2dict(r):
         if hasattr(v,'isoformat'): d[k] = v.isoformat()
     return d
 
+def save_notification(user_id, title, body, ntype="transaction"):
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO notifications(user_id,title,body,type) VALUES(%s,%s,%s,%s) RETURNING *",
+                (user_id, title, body, ntype))
+            n = row2dict(cur.fetchone())
+        c.commit()
+    return n
+
+def send_email(email: str, title: str, message: str):
+    """Send Email via SES"""
+    if not email:
+        return
+    try:
+        ses.send_email(
+            Source=SES_SENDER,
+            Destination={"ToAddresses": [email]},
+            Message={
+                "Subject": {"Data": f"NovaBank - {title}", "Charset": "UTF-8"},
+                "Body": {
+                    "Html": {
+                        "Data": f"""
+                        <div dir="rtl" style="font-family:Arial;padding:20px;background:#f5f5f5;">
+                          <div style="background:white;padding:20px;border-radius:8px;max-width:500px;margin:auto;">
+                            <h2 style="color:#1a56db;">🏦 NovaBank</h2>
+                            <h3>{title}</h3>
+                            <p style="font-size:16px;">{message}</p>
+                            <hr/>
+                            <small style="color:#888;">هذا إشعار تلقائي من NovaBank - لا ترد على هذا البريد</small>
+                          </div>
+                        </div>""",
+                        "Charset": "UTF-8"
+                    },
+                    "Text": {"Data": f"{title}\n{message}", "Charset": "UTF-8"}
+                }
+            }
+        )
+        log.info(f"Email sent to {email}")
+    except Exception as e:
+        log.error(f"Email failed: {e}")
+
+def process_sqs_message(msg):
+    """Process one SQS message → save to DB + send SMS"""
+    try:
+        body = json.loads(msg["Body"])
+        user_id  = body.get("user_id")
+        title    = body.get("title", "إشعار من نوفا بنك")
+        text     = body.get("body", "")
+        ntype    = body.get("type", "transaction")
+        phone    = body.get("phone")
+
+        # Save to DB
+        if user_id:
+            save_notification(user_id, title, text, ntype)
+            log.info(f"Notification saved for user {user_id}")
+
+        # Send Email
+        email = body.get("email")
+        if email:
+            send_email(email, title, text)
+
+    except Exception as e:
+        log.error(f"Error processing SQS message: {e}")
+        raise
+
+def sqs_worker():
+    """Background thread: poll SQS continuously"""
+    if not SQS_QUEUE_URL:
+        log.warning("SQS_QUEUE_URL not set — SMS worker disabled")
+        return
+
+    log.info(f"SQS worker started, polling: {SQS_QUEUE_URL}")
+    while True:
+        try:
+            resp = sqs.receive_message(
+                QueueUrl=SQS_QUEUE_URL,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=20,
+                AttributeNames=["All"]
+            )
+            messages = resp.get("Messages", [])
+            for msg in messages:
+                try:
+                    process_sqs_message(msg)
+                    sqs.delete_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        ReceiptHandle=msg["ReceiptHandle"]
+                    )
+                except Exception as e:
+                    log.error(f"Failed to process message: {e}")
+        except Exception as e:
+            log.error(f"SQS receive error: {e}")
+            time.sleep(5)
+
 @app.on_event("startup")
 def startup():
     for i in range(20):
-        try: init_db(); log.info("Notifications DB ready"); return
+        try: init_db(); log.info("Notifications DB ready"); break
         except Exception as e: log.warning(f"DB not ready ({i+1}/20): {e}"); time.sleep(3)
-    raise RuntimeError("Notifications DB failed")
+    # Start SQS worker in background
+    t = threading.Thread(target=sqs_worker, daemon=True)
+    t.start()
 
 @app.get("/health")
 def health(): return {"status":"ok","service":"notifications-service"}
@@ -76,10 +188,7 @@ def mark_all_read(user_id: str):
 
 @app.post("/internal/create")
 def create(data: dict):
-    with conn() as c:
-        with c.cursor() as cur:
-            cur.execute("INSERT INTO notifications(user_id,title,body,type) VALUES(%s,%s,%s,%s) RETURNING *",
-                        (data["user_id"],data["title"],data["body"],data.get("type","system")))
-            n = row2dict(cur.fetchone())
-        c.commit()
+    """Direct HTTP create (backward compat) — no SMS"""
+    n = save_notification(
+        data["user_id"], data["title"], data["body"], data.get("type","system"))
     return {"ok":True,"notification":n}

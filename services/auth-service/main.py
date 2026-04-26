@@ -7,9 +7,13 @@ from jose import jwt
 from pydantic import BaseModel
 from typing import Optional
 
-JWT_SECRET   = os.getenv("JWT_SECRET", "nova-bank-jwt-secret-2025")
+JWT_SECRET   = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET env var is required — set it via AWS Secrets Manager")
 JWT_ALGO     = "HS256"
-DB_URL       = os.getenv("DATABASE_URL")
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL env var is required — injected by ECS entrypoint from Secrets Manager")
 ACCOUNTS_URL = os.getenv("ACCOUNTS_URL", "http://accounts-service:8002")
 
 logging.basicConfig(level=logging.INFO,
@@ -17,7 +21,13 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Auth Service")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS: internal services only talk to api-gateway, not browser directly
+# api-gateway handles CORS for public-facing routes
+app.add_middleware(CORSMiddleware,
+    allow_origins=[os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allow_headers=["Authorization", "Content-Type"])
 
 def conn():
     return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
