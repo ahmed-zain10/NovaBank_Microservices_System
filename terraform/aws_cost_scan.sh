@@ -45,7 +45,7 @@ aws ec2 describe-nat-gateways --region $REGION \
 echo "$S"
 echo "🔌 VPC Endpoints - Interface"
 aws ec2 describe-vpc-endpoints --region $REGION \
-  --filters "Name=vpc-endpoint-type,Values=Interface" "Name=state,Values=available,pending" \
+  --filters "Name=vpc-endpoint-type,Values=Interface" \
   --query 'VpcEndpoints[*].{ID:VpcEndpointId,Service:ServiceName,State:State}' \
   --output table
 

@@ -1,0 +1,268 @@
+// ============================================================
+// NovaBank — Pipeline 1: Full Deploy (من الصفر)
+// ============================================================
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION      = 'us-east-1'
+        AWS_ACCOUNT_ID  = '816709079108'
+        ENV             = 'dev'
+        PROJECT         = 'novabank'
+        REGISTRY        = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        TF_DIR          = 'terraform/envs/dev'
+        CLUSTER         = 'novabank-dev-cluster'
+    }
+
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: 'v1.0.0', description: 'Docker image tag')
+    }
+
+    stages {
+
+        // ── 1. Install Dependencies ────────────────────────────
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    echo "=== Checking dependencies ==="
+
+                    # AWS CLI
+                    if ! command -v aws &>/dev/null; then
+                        echo "Installing AWS CLI..."
+                        curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+                        unzip -q /tmp/awscliv2.zip -d /tmp
+                        sudo /tmp/aws/install
+                        rm -rf /tmp/aws /tmp/awscliv2.zip
+                    fi
+                    aws --version
+
+                    # Terraform
+                    if ! command -v terraform &>/dev/null; then
+                        echo "Installing Terraform..."
+                        curl -fsSL "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" \
+                            -o /tmp/terraform.zip
+                        unzip -q /tmp/terraform.zip -d /usr/local/bin
+                        chmod +x /usr/local/bin/terraform
+                        rm /tmp/terraform.zip
+                    fi
+                    terraform --version
+
+                    # Docker
+                    docker --version
+
+                    echo "✅ All dependencies ready"
+                '''
+            }
+        }
+
+        // ── 2. Checkout ────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'echo "✅ Code checked out: $(git log --oneline -1)"'
+            }
+        }
+
+        // ── 3. Bootstrap Terraform State ───────────────────────
+        stage('Bootstrap State') {
+            steps {
+                sh '''
+                    echo "=== Bootstrapping Terraform State ==="
+                    cd terraform/scripts
+                    chmod +x bootstrap_state.sh
+                    # تشتغل بس لو الـ bucket مش موجود
+                    BUCKET="novabank-terraform-state-dev"
+                    if aws s3api head-bucket --bucket "$BUCKET" --region us-east-1 2>/dev/null; then
+                        echo "✅ State bucket already exists — skipping bootstrap"
+                    else
+                        ./bootstrap_state.sh dev us-east-1
+                        echo "✅ Bootstrap complete"
+                    fi
+                '''
+            }
+        }
+
+        // ── 4. Build Lambda Zip ────────────────────────────────
+        stage('Build Lambda') {
+            steps {
+                sh '''
+                    echo "=== Building Lambda Zip ==="
+                    cd terraform/modules/rds
+                    chmod +x build_lambda.sh
+                    ./build_lambda.sh
+                    echo "✅ Lambda zip built"
+                '''
+            }
+        }
+
+        // ── 5. Terraform Init ──────────────────────────────────
+        stage('Terraform Init') {
+            steps {
+                sh '''
+                    echo "=== Terraform Init ==="
+                    cd ${TF_DIR}
+                    terraform init -reconfigure
+                    echo "✅ Terraform initialized"
+                '''
+            }
+        }
+
+        // ── 6. Terraform Plan ──────────────────────────────────
+        stage('Terraform Plan') {
+            steps {
+                sh '''
+                    echo "=== Terraform Plan ==="
+                    cd ${TF_DIR}
+                    terraform plan \
+                        -var-file=terraform.tfvars \
+                        -var="image_tag=${IMAGE_TAG}" \
+                        -out=tfplan
+                    echo "✅ Plan complete"
+                '''
+            }
+        }
+
+        // ── 7. Terraform Apply ─────────────────────────────────
+        stage('Terraform Apply') {
+            steps {
+                sh '''
+                    echo "=== Terraform Apply ==="
+                    cd ${TF_DIR}
+                    terraform apply -auto-approve tfplan
+                    echo "✅ Infrastructure deployed"
+                '''
+            }
+        }
+
+        // ── 8. ECR Login ───────────────────────────────────────
+        stage('ECR Login') {
+            steps {
+                sh '''
+                    echo "=== Logging in to ECR ==="
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${REGISTRY}
+                    echo "✅ ECR login successful"
+                '''
+            }
+        }
+
+        // ── 9. Build & Push Docker Images ─────────────────────
+        stage('Build & Push Images') {
+            steps {
+                sh '''
+                    echo "=== Building and pushing images ==="
+                    chmod +x terraform/scripts/push_images.sh
+                    ./terraform/scripts/push_images.sh \
+                        ${ENV} ${AWS_REGION} ${AWS_ACCOUNT_ID} ${IMAGE_TAG}
+                    echo "✅ All images pushed"
+                '''
+            }
+        }
+
+        // ── 10. Init Database ──────────────────────────────────
+        stage('Init Database') {
+            steps {
+                sh '''
+                    echo "=== Initializing Database ==="
+                    # انتظر الـ Lambda تكون جاهزة
+                    sleep 30
+                    aws lambda invoke \
+                        --function-name novabank-dev-db-init \
+                        --region ${AWS_REGION} \
+                        /tmp/db-result.json
+                    cat /tmp/db-result.json
+                    STATUS=$(python3 -c "import json; d=json.load(open('/tmp/db-result.json')); print(d.get('statusCode',500))")
+                    if [ "$STATUS" != "200" ]; then
+                        echo "❌ DB init failed!"
+                        exit 1
+                    fi
+                    echo "✅ Database initialized"
+                '''
+            }
+        }
+
+        // ── 11. Force Redeploy ECS Services ───────────────────
+        stage('Deploy ECS Services') {
+            steps {
+                sh '''
+                    echo "=== Redeploying ECS Services ==="
+                    SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
+                    for svc in $SERVICES; do
+                        aws ecs update-service \
+                            --cluster ${CLUSTER} \
+                            --service novabank-dev-${svc} \
+                            --force-new-deployment \
+                            --region ${AWS_REGION} > /dev/null
+                        echo "  ↻ ${svc} redeployed"
+                    done
+                    echo "✅ All services redeployed"
+                '''
+            }
+        }
+
+        // ── 12. Health Check ───────────────────────────────────
+        stage('Health Check') {
+            steps {
+                sh '''
+                    echo "=== Waiting for services to be healthy ==="
+                    sleep 120
+
+                    SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
+                    ALL_HEALTHY=true
+
+                    for svc in $SERVICES; do
+                        RUNNING=$(aws ecs describe-services \
+                            --cluster ${CLUSTER} \
+                            --services novabank-dev-${svc} \
+                            --region ${AWS_REGION} \
+                            --query 'services[0].runningCount' \
+                            --output text)
+                        DESIRED=$(aws ecs describe-services \
+                            --cluster ${CLUSTER} \
+                            --services novabank-dev-${svc} \
+                            --region ${AWS_REGION} \
+                            --query 'services[0].desiredCount' \
+                            --output text)
+
+                        if [ "$RUNNING" = "$DESIRED" ]; then
+                            echo "  ✅ ${svc}: ${RUNNING}/${DESIRED}"
+                        else
+                            echo "  ❌ ${svc}: ${RUNNING}/${DESIRED}"
+                            ALL_HEALTHY=false
+                        fi
+                    done
+
+                    if [ "$ALL_HEALTHY" = "false" ]; then
+                        echo "❌ Some services are not healthy!"
+                        exit 1
+                    fi
+
+                    echo "✅ All services healthy!"
+
+                    # Test endpoints
+                    CUSTOMER_URL="https://app-dev.novabank-eg.com"
+                    TELLER_URL="https://teller-dev.novabank-eg.com"
+
+                    CUST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${CUSTOMER_URL}/health || echo "000")
+                    echo "Customer Portal: ${CUST_STATUS}"
+
+                    echo "🚀 Deploy complete!"
+                    echo "   Customer: ${CUSTOMER_URL}"
+                    echo "   Teller:   ${TELLER_URL}"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '🎉 Full Deploy completed successfully!'
+        }
+        failure {
+            echo '❌ Deploy failed! Check logs above.'
+        }
+        always {
+            sh 'rm -f /tmp/db-result.json ${TF_DIR}/tfplan || true'
+        }
+    }
+}

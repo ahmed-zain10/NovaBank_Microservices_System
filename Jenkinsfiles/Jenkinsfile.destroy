@@ -1,0 +1,325 @@
+// ============================================================
+// NovaBank — Pipeline 3: Destroy (هد كل حاجة)
+// مع Manual Approval قبل التنفيذ
+// ============================================================
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION     = 'us-east-1'
+        AWS_ACCOUNT_ID = '816709079108'
+        ENV            = 'dev'
+        PROJECT        = 'novabank'
+        TF_DIR         = 'terraform/envs/dev'
+        STATE_BUCKET   = 'novabank-terraform-state-dev'
+        LOCK_TABLE     = 'novabank-terraform-locks-dev'
+    }
+
+    stages {
+
+        // ── 1. Install Dependencies ────────────────────────────
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    # AWS CLI
+                    if ! command -v aws &>/dev/null; then
+                        curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+                        unzip -q /tmp/awscliv2.zip -d /tmp
+                        sudo /tmp/aws/install
+                        rm -rf /tmp/aws /tmp/awscliv2.zip
+                    fi
+
+                    # Terraform
+                    if ! command -v terraform &>/dev/null; then
+                        curl -fsSL "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" \
+                            -o /tmp/terraform.zip
+                        unzip -q /tmp/terraform.zip -d /usr/local/bin
+                        chmod +x /usr/local/bin/terraform
+                        rm /tmp/terraform.zip
+                    fi
+
+                    aws --version
+                    terraform --version
+                    echo "✅ Dependencies ready"
+                '''
+            }
+        }
+
+        // ── 2. Checkout ────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        // ── 3. Show What Will Be Destroyed ────────────────────
+        stage('Show Resources') {
+            steps {
+                sh '''
+                    echo "======================================"
+                    echo "⚠️  RESOURCES THAT WILL BE DESTROYED"
+                    echo "======================================"
+
+                    echo ""
+                    echo "--- ECS Services ---"
+                    aws ecs list-services \
+                        --cluster novabank-dev-cluster \
+                        --region ${AWS_REGION} \
+                        --query 'serviceArns[*]' \
+                        --output table 2>/dev/null || echo "No ECS services found"
+
+                    echo ""
+                    echo "--- ECR Repositories ---"
+                    aws ecr describe-repositories \
+                        --region ${AWS_REGION} \
+                        --query 'repositories[?contains(repositoryName, `novabank`)].repositoryName' \
+                        --output table 2>/dev/null || echo "No ECR repos found"
+
+                    echo ""
+                    echo "--- RDS Instances ---"
+                    aws rds describe-db-instances \
+                        --region ${AWS_REGION} \
+                        --query 'DBInstances[?contains(DBInstanceIdentifier, `novabank`)].DBInstanceIdentifier' \
+                        --output table 2>/dev/null || echo "No RDS found"
+
+                    echo ""
+                    echo "--- Load Balancers ---"
+                    aws elbv2 describe-load-balancers \
+                        --region ${AWS_REGION} \
+                        --query 'LoadBalancers[?contains(LoadBalancerName, `novabank`)].LoadBalancerName' \
+                        --output table 2>/dev/null || echo "No ALBs found"
+
+                    echo ""
+                    echo "======================================"
+                    echo "⚠️  ALL OF THE ABOVE WILL BE DELETED!"
+                    echo "======================================"
+                '''
+            }
+        }
+
+        // ── 4. MANUAL APPROVAL ─────────────────────────────────
+        stage('⚠️ Manual Approval') {
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: '⚠️ هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟\nده مش ممكن يتراجع!',
+                        ok: '✅ نعم، امسح كل حاجة',
+                        submitter: 'admin',
+                        parameters: [
+                            string(
+                                name: 'CONFIRM',
+                                defaultValue: '',
+                                description: 'اكتب "DESTROY" للتأكيد'
+                            )
+                        ]
+                    )
+                }
+                script {
+                    if (params.CONFIRM != 'DESTROY') {
+                        error('❌ لازم تكتب "DESTROY" للتأكيد')
+                    }
+                }
+            }
+        }
+
+        // ── 5. Stop ECS Services ───────────────────────────────
+        stage('Stop ECS Services') {
+            steps {
+                sh '''
+                    echo "=== Stopping ECS Services ==="
+                    SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
+
+                    for svc in $SERVICES; do
+                        aws ecs update-service \
+                            --cluster novabank-dev-cluster \
+                            --service novabank-dev-${svc} \
+                            --desired-count 0 \
+                            --region ${AWS_REGION} > /dev/null 2>&1 || true
+                        echo "  ⏹ ${svc} stopped"
+                    done
+
+                    echo "Waiting 30s for tasks to stop..."
+                    sleep 30
+                    echo "✅ ECS services stopped"
+                '''
+            }
+        }
+
+        // ── 6. Clear ECR Images ────────────────────────────────
+        stage('Clear ECR Images') {
+            steps {
+                sh '''
+                    echo "=== Clearing ECR Images ==="
+                    REPOS="accounts-service api-gateway auth-service transactions-service notifications-service frontend-customers frontend-teller"
+
+                    for repo in $REPOS; do
+                        FULL_REPO="novabank/dev/${repo}"
+                        IMAGE_IDS=$(aws ecr list-images \
+                            --repository-name "$FULL_REPO" \
+                            --region ${AWS_REGION} \
+                            --query 'imageIds[*]' \
+                            --output json 2>/dev/null || echo "[]")
+
+                        if [ "$IMAGE_IDS" = "[]" ] || [ "$IMAGE_IDS" = "null" ]; then
+                            echo "  ℹ️ ${repo}: no images"
+                            continue
+                        fi
+
+                        aws ecr batch-delete-image \
+                            --repository-name "$FULL_REPO" \
+                            --image-ids "$IMAGE_IDS" \
+                            --region ${AWS_REGION} > /dev/null 2>&1 || true
+                        echo "  🗑️ ${repo}: images deleted"
+                    done
+
+                    echo "✅ ECR cleared"
+                '''
+            }
+        }
+
+        // ── 7. Terraform Init ──────────────────────────────────
+        stage('Terraform Init') {
+            steps {
+                sh '''
+                    echo "=== Terraform Init ==="
+                    cd ${TF_DIR}
+                    terraform init -reconfigure || \
+                    terraform init -reconfigure -lock=false
+                    echo "✅ Terraform initialized"
+                '''
+            }
+        }
+
+        // ── 8. Terraform Destroy ───────────────────────────────
+        stage('Terraform Destroy') {
+            steps {
+                sh '''
+                    echo "=== Terraform Destroy ==="
+                    cd ${TF_DIR}
+                    terraform destroy \
+                        -var-file=terraform.tfvars \
+                        -auto-approve \
+                        2>&1 | tee /tmp/destroy-output.txt
+
+                    DESTROY_STATUS=${PIPESTATUS[0]}
+                    if [ $DESTROY_STATUS -ne 0 ]; then
+                        echo "⚠️ Terraform destroy had errors — trying with -lock=false"
+                        terraform destroy \
+                            -var-file=terraform.tfvars \
+                            -auto-approve \
+                            -lock=false
+                    fi
+                    echo "✅ Infrastructure destroyed"
+                '''
+            }
+        }
+
+        // ── 9. Delete S3 State Bucket ──────────────────────────
+        stage('Delete State Bucket') {
+            steps {
+                sh '''
+                    echo "=== Deleting S3 State Bucket ==="
+                    BUCKET="${STATE_BUCKET}"
+
+                    # Check if bucket exists
+                    if ! aws s3api head-bucket --bucket "$BUCKET" --region ${AWS_REGION} 2>/dev/null; then
+                        echo "ℹ️ Bucket doesn't exist — skipping"
+                    else
+                        # Delete all versions
+                        for TYPE in Versions DeleteMarkers; do
+                            ITEMS=$(aws s3api list-object-versions \
+                                --bucket "$BUCKET" \
+                                --region ${AWS_REGION} \
+                                --query "${TYPE}[].{Key:Key,VersionId:VersionId}" \
+                                --output json 2>/dev/null || echo "[]")
+
+                            if [ "$ITEMS" != "[]" ] && [ "$ITEMS" != "null" ]; then
+                                python3 -c "
+import json, subprocess, sys
+items = json.loads('''$ITEMS''')
+if not items:
+    sys.exit(0)
+result = subprocess.run([
+    'aws', 's3api', 'delete-objects',
+    '--bucket', '$BUCKET',
+    '--delete', json.dumps({'Objects': items, 'Quiet': True}),
+    '--region', '${AWS_REGION}'
+], capture_output=True)
+print(f'Deleted {len(items)} {\"$TYPE\"}')
+" 2>/dev/null || true
+                            fi
+                        done
+
+                        # Delete bucket
+                        aws s3api delete-bucket \
+                            --bucket "$BUCKET" \
+                            --region ${AWS_REGION} 2>/dev/null || true
+                        echo "✅ State bucket deleted"
+                    fi
+                '''
+            }
+        }
+
+        // ── 10. Delete DynamoDB Lock Table ─────────────────────
+        stage('Delete Lock Table') {
+            steps {
+                sh '''
+                    echo "=== Deleting DynamoDB Lock Table ==="
+                    aws dynamodb delete-table \
+                        --table-name ${LOCK_TABLE} \
+                        --region ${AWS_REGION} 2>/dev/null || \
+                    echo "ℹ️ Lock table doesn't exist or already deleted"
+                    echo "✅ Lock table deleted"
+                '''
+            }
+        }
+
+        // ── 11. Verify Destruction ─────────────────────────────
+        stage('Verify Destruction') {
+            steps {
+                sh '''
+                    echo "=== Verifying Destruction ==="
+
+                    # Check ECS cluster
+                    CLUSTER_STATUS=$(aws ecs describe-clusters \
+                        --clusters novabank-dev-cluster \
+                        --region ${AWS_REGION} \
+                        --query 'clusters[0].status' \
+                        --output text 2>/dev/null || echo "INACTIVE")
+                    echo "ECS Cluster: ${CLUSTER_STATUS}"
+
+                    # Check RDS
+                    RDS_COUNT=$(aws rds describe-db-instances \
+                        --region ${AWS_REGION} \
+                        --query 'length(DBInstances[?contains(DBInstanceIdentifier, `novabank`)])' \
+                        --output text 2>/dev/null || echo "0")
+                    echo "RDS Instances: ${RDS_COUNT}"
+
+                    echo ""
+                    echo "======================================"
+                    echo "🗑️  DESTRUCTION COMPLETE"
+                    echo "   Account: ${AWS_ACCOUNT_ID}"
+                    echo "   Region:  ${AWS_REGION}"
+                    echo "   Env:     ${ENV}"
+                    echo "======================================"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '🗑️ Infrastructure successfully destroyed!'
+        }
+        failure {
+            sh '''
+                echo "❌ Destroy pipeline failed!"
+                echo "Check logs — some resources might still exist"
+                echo "Run manually: cd terraform/envs/dev && terraform destroy -var-file=terraform.tfvars -lock=false"
+            '''
+        }
+        always {
+            sh 'rm -f /tmp/destroy-output.txt || true'
+        }
+    }
+}
