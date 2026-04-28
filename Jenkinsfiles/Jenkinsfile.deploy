@@ -27,7 +27,9 @@ pipeline {
                     echo "=== Checking dependencies ==="
 
                     # AWS CLI
-                    if ! command -v aws &>/dev/null; then
+                    if aws --version &>/dev/null; then
+                        echo "AWS CLI already installed"
+                    else
                         echo "Installing AWS CLI..."
                         sudo rm -rf /tmp/aws /tmp/awscliv2.zip
                         curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
