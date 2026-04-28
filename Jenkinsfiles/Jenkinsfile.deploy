@@ -104,15 +104,64 @@ pipeline {
                         chmod +x build_lambda.sh
                         ./build_lambda.sh
 
-                        # ── Terraform ─────────────────────
+                        # ── Terraform Init ────────────────
                         echo "=== Terraform ==="
                         cd ../../envs/dev
 
+                        mkdir -p $HOME/.terraform.d/plugin-cache
                         export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
 
-                        mkdir -p $HOME/.terraform.d/plugin-cache
                         terraform init -reconfigure
 
+                        # ── Import Secrets لو موجودة على AWS ──
+                        echo "=== Import existing secrets (if any) ==="
+
+                        # دالة تعمل import لو السيكريت موجود على AWS
+                        # ولو موجود في الـ state خلاص بتتجاهله بدون error
+                        tf_import_if_exists() {
+                            TF_ADDR="$1"
+                            AWS_SECRET_ID="$2"
+
+                            if aws secretsmanager describe-secret \
+                                --secret-id "$AWS_SECRET_ID" \
+                                --region ${AWS_REGION} \
+                                --output text \
+                                --query "Name" 2>/dev/null | grep -q "$AWS_SECRET_ID"; then
+
+                                echo "→ Secret موجود: $AWS_SECRET_ID — بنعمل import..."
+                                terraform import "$TF_ADDR" "$AWS_SECRET_ID" 2>&1 | grep -v "already managed" || true
+                            else
+                                echo "→ Secret مش موجود: $AWS_SECRET_ID — هيتعمل جديد"
+                            fi
+                        }
+
+                        tf_import_if_exists \
+                            "module.secrets.aws_secretsmanager_secret.rds_master" \
+                            "novabank/dev/rds/master"
+
+                        tf_import_if_exists \
+                            'module.secrets.aws_secretsmanager_secret.schema_creds["transactions"]' \
+                            "novabank/dev/rds/transactions"
+
+                        tf_import_if_exists \
+                            'module.secrets.aws_secretsmanager_secret.schema_creds["auth"]' \
+                            "novabank/dev/rds/auth"
+
+                        tf_import_if_exists \
+                            'module.secrets.aws_secretsmanager_secret.schema_creds["notifications"]' \
+                            "novabank/dev/rds/notifications"
+
+                        tf_import_if_exists \
+                            'module.secrets.aws_secretsmanager_secret.schema_creds["accounts"]' \
+                            "novabank/dev/rds/accounts"
+
+                        tf_import_if_exists \
+                            "module.secrets.aws_secretsmanager_secret.jwt" \
+                            "novabank/dev/jwt-secret"
+
+                        echo "=== Import done ==="
+
+                        # ── Terraform Plan & Apply ─────────
                         terraform plan \
                             -var-file=terraform.tfvars \
                             -var="image_tag=${IMAGE_TAG}" \
@@ -146,6 +195,7 @@ pipeline {
 
                         if [ "$STATUS" != "200" ]; then
                           echo "❌ DB init failed"
+                          cat /tmp/db-result.json
                           exit 1
                         fi
 
