@@ -10,12 +10,11 @@ mkdir -p "$BUILD_DIR"
 
 cp "$DIR/db_init_lambda/index.py" "$BUILD_DIR/"
 
-# استخدم python image عادي مش lambda entrypoint
+# بناء جوه Docker — بدون --platform flag، الـ container نفسه linux/amd64
 docker run --rm \
   -v "$BUILD_DIR":/var/task \
   python:3.11-slim \
-  pip install psycopg2-binary boto3 -t /var/task/ --quiet \
-  --platform linux/amd64
+  pip install psycopg2-binary boto3 -t /var/task/ --quiet
 
 cd "$BUILD_DIR"
 zip -r "$ZIP" . -q
