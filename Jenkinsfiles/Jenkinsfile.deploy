@@ -29,18 +29,13 @@ pipeline {
             steps {
                 sh '''
                     set -e
-
                     echo "=== Installing base packages ==="
                     sudo apt-get update -y --allow-insecure-repositories || true
                     sudo apt-get install -y zip unzip jq python3
 
-                    echo "=== Checking dependencies ==="
-
-                    # AWS CLI
                     if command -v aws &>/dev/null; then
                         echo "AWS CLI already installed"
                     else
-                        echo "Installing AWS CLI..."
                         rm -rf /tmp/aws /tmp/awscliv2.zip
                         curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
                         unzip -o -q /tmp/awscliv2.zip -d /tmp
@@ -48,21 +43,17 @@ pipeline {
                     fi
                     aws --version
 
-                    # Terraform
                     if command -v terraform &>/dev/null; then
                         echo "Terraform already installed"
                     else
-                        echo "Installing Terraform..."
                         curl -fsSL https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip -o /tmp/terraform.zip
                         sudo unzip -o -q /tmp/terraform.zip -d /usr/local/bin
                         sudo chmod +x /usr/local/bin/terraform
                     fi
                     terraform --version
 
-                    # Docker check
-                    docker --version || (echo "❌ Docker not found" && exit 1)
-
-                    echo "✅ Dependencies ready"
+                    docker --version || (echo "Docker not found" && exit 1)
+                    echo "Dependencies ready"
                 '''
             }
         }
@@ -75,22 +66,20 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-creds'
-                ]]) {
-
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds'],
+                    file(credentialsId: 'terraform-tfvars-dev', variable: 'TFVARS_FILE')
+                ]) {
                     sh '''
                         set -e
 
                         echo "=== AWS Identity ==="
                         aws sts get-caller-identity
 
-                        # ── Bootstrap ─────────────────────
+                        # Bootstrap
                         echo "=== Bootstrap State ==="
                         cd terraform/scripts
                         BUCKET="novabank-terraform-state-dev"
-
                         if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
                             echo "Bucket exists"
                         else
@@ -98,70 +87,53 @@ pipeline {
                             ./bootstrap_state.sh dev ${AWS_REGION}
                         fi
 
-                        # ── Build Lambda ──────────────────
+                        # Build Lambda
                         echo "=== Build Lambda ==="
                         cd ../modules/rds
                         chmod +x build_lambda.sh
                         ./build_lambda.sh
 
-                        # ── Terraform Init ────────────────
-                        echo "=== Terraform ==="
+                        # Terraform
+                        echo "=== Terraform Init ==="
                         cd ../../envs/dev
+
+                        # انسخ الـ tfvars من Jenkins Credentials
+                        cp "$TFVARS_FILE" terraform.tfvars
 
                         mkdir -p $HOME/.terraform.d/plugin-cache
                         export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
-
                         terraform init -reconfigure
 
-                        # ── Import Secrets لو موجودة على AWS ──
-                        echo "=== Import existing secrets (if any) ==="
+                        # Import Secrets لو موجودة
+                        echo "=== Import existing secrets ==="
 
-                        # دالة تعمل import لو السيكريت موجود على AWS
-                        # ولو موجود في الـ state خلاص بتتجاهله بدون error
                         tf_import_if_exists() {
                             TF_ADDR="$1"
                             AWS_SECRET_ID="$2"
-
                             if aws secretsmanager describe-secret \
                                 --secret-id "$AWS_SECRET_ID" \
                                 --region ${AWS_REGION} \
-                                --output text \
-                                --query "Name" 2>/dev/null | grep -q "$AWS_SECRET_ID"; then
-
-                                echo "→ Secret موجود: $AWS_SECRET_ID — بنعمل import..."
-                                terraform import "$TF_ADDR" "$AWS_SECRET_ID" 2>&1 | grep -v "already managed" || true
+                                --output text --query "Name" 2>/dev/null | grep -q "."; then
+                                echo "Importing: $AWS_SECRET_ID"
+                                terraform import \
+                                    -var-file=terraform.tfvars \
+                                    -var="image_tag=${IMAGE_TAG}" \
+                                    "$TF_ADDR" "$AWS_SECRET_ID" 2>&1 || true
                             else
-                                echo "→ Secret مش موجود: $AWS_SECRET_ID — هيتعمل جديد"
+                                echo "Not found on AWS, will create: $AWS_SECRET_ID"
                             fi
                         }
 
-                        tf_import_if_exists \
-                            "module.secrets.aws_secretsmanager_secret.rds_master" \
-                            "novabank/dev/rds/master"
-
-                        tf_import_if_exists \
-                            'module.secrets.aws_secretsmanager_secret.schema_creds["transactions"]' \
-                            "novabank/dev/rds/transactions"
-
-                        tf_import_if_exists \
-                            'module.secrets.aws_secretsmanager_secret.schema_creds["auth"]' \
-                            "novabank/dev/rds/auth"
-
-                        tf_import_if_exists \
-                            'module.secrets.aws_secretsmanager_secret.schema_creds["notifications"]' \
-                            "novabank/dev/rds/notifications"
-
-                        tf_import_if_exists \
-                            'module.secrets.aws_secretsmanager_secret.schema_creds["accounts"]' \
-                            "novabank/dev/rds/accounts"
-
-                        tf_import_if_exists \
-                            "module.secrets.aws_secretsmanager_secret.jwt" \
-                            "novabank/dev/jwt-secret"
+                        tf_import_if_exists "module.secrets.aws_secretsmanager_secret.rds_master" "novabank/dev/rds/master"
+                        tf_import_if_exists 'module.secrets.aws_secretsmanager_secret.schema_creds["transactions"]' "novabank/dev/rds/transactions"
+                        tf_import_if_exists 'module.secrets.aws_secretsmanager_secret.schema_creds["auth"]' "novabank/dev/rds/auth"
+                        tf_import_if_exists 'module.secrets.aws_secretsmanager_secret.schema_creds["notifications"]' "novabank/dev/rds/notifications"
+                        tf_import_if_exists 'module.secrets.aws_secretsmanager_secret.schema_creds["accounts"]' "novabank/dev/rds/accounts"
+                        tf_import_if_exists "module.secrets.aws_secretsmanager_secret.jwt" "novabank/dev/jwt-secret"
 
                         echo "=== Import done ==="
 
-                        # ── Terraform Plan & Apply ─────────
+                        # Plan & Apply
                         terraform plan \
                             -var-file=terraform.tfvars \
                             -var="image_tag=${IMAGE_TAG}" \
@@ -169,18 +141,18 @@ pipeline {
 
                         terraform apply -auto-approve tfplan
 
-                        # ── ECR Login ────────────────────
+                        # ECR Login
                         echo "=== ECR Login ==="
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${REGISTRY}
 
-                        # ── Push Images ──────────────────
+                        # Push Images
                         echo "=== Push Images ==="
                         cd ../../scripts
                         chmod +x push_images.sh
                         ./push_images.sh ${ENV} ${AWS_REGION} ${AWS_ACCOUNT_ID} ${IMAGE_TAG}
 
-                        # ── Lambda Init ──────────────────
+                        # Lambda DB Init
                         echo "=== Init DB ==="
                         aws lambda wait function-active \
                           --function-name novabank-dev-db-init \
@@ -192,14 +164,13 @@ pipeline {
                           /tmp/db-result.json
 
                         STATUS=$(python3 -c "import json; print(json.load(open('/tmp/db-result.json')).get('statusCode',500))")
-
                         if [ "$STATUS" != "200" ]; then
-                          echo "❌ DB init failed"
+                          echo "DB init failed"
                           cat /tmp/db-result.json
                           exit 1
                         fi
 
-                        # ── ECS Deploy ───────────────────
+                        # ECS Deploy
                         echo "=== ECS Deploy ==="
                         SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
 
@@ -212,17 +183,15 @@ pipeline {
                         done
 
                         echo "Waiting for ECS stability..."
-
                         for svc in $SERVICES; do
                             aws ecs wait services-stable \
                                 --cluster ${CLUSTER} \
                                 --services novabank-dev-${svc} \
                                 --region ${AWS_REGION}
-
-                            echo "✅ $svc stable"
+                            echo "$svc stable"
                         done
 
-                        echo "🚀 DEPLOY DONE"
+                        echo "DEPLOY DONE"
                     '''
                 }
             }
@@ -231,13 +200,14 @@ pipeline {
 
     post {
         always {
-            sh 'rm -f /tmp/db-result.json terraform/envs/dev/tfplan || true'
+            // احذف الـ tfvars من الـ workspace عشان ما يفضلش على السيرفر
+            sh 'rm -f /tmp/db-result.json terraform/envs/dev/tfplan terraform/envs/dev/terraform.tfvars || true'
         }
         success {
-            echo '🎉 Deploy SUCCESS'
+            echo 'Deploy SUCCESS'
         }
         failure {
-            echo '❌ Deploy FAILED'
+            echo 'Deploy FAILED'
         }
     }
 }
