@@ -116,44 +116,6 @@ pipeline {
 
         // ── 6. Terraform Init ──────────────────────────────────
 
-        // ── 5. Deploy Lambda Zip ──────────────────────────────
-        stage('Deploy Lambda') {
-            steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
-                ]) {
-                    sh '''
-                        echo "=== Uploading Lambda Zip to AWS ==="
-                        ZIP_PATH="terraform/modules/rds/db_init_lambda.zip"
-
-                        if [ ! -f "$ZIP_PATH" ]; then
-                            echo "❌ Lambda zip not found at $ZIP_PATH"
-                            exit 1
-                        fi
-
-                        # انتظر الـ Lambda تكون active قبل الـ update
-                        aws lambda wait function-active \
-                            --function-name novabank-${ENV}-db-init \
-                            --region ${AWS_REGION}
-
-                        aws lambda update-function-code \
-                            --function-name novabank-${ENV}-db-init \
-                            --zip-file fileb://$ZIP_PATH \
-                            --region ${AWS_REGION} \
-                            --query 'FunctionArn' \
-                            --output text
-
-                        # انتظر الـ update يخلص قبل ما نكمل
-                        aws lambda wait function-updated \
-                            --function-name novabank-${ENV}-db-init \
-                            --region ${AWS_REGION}
-
-                        echo "✅ Lambda deployed successfully"
-                    '''
-                }
-            }
-        }
-
         stage('Terraform Init') {
             steps {
                 withCredentials([
@@ -260,7 +222,46 @@ pipeline {
             }
         }
 
-        // ── 10. ECR Login ───────────────────────────────────────
+        // ── 10. Deploy Lambda ─────────────────────────────────
+        stage('Deploy Lambda') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    sh '''
+                        echo "=== Uploading Lambda Zip to AWS ==="
+                        ZIP_PATH="terraform/modules/rds/db_init_lambda.zip"
+
+                        if [ ! -f "$ZIP_PATH" ]; then
+                            echo "❌ Lambda zip not found at $ZIP_PATH"
+                            exit 1
+                        fi
+
+                        # انتظر الـ Lambda تكون active (Terraform أنشأها للتو)
+                        aws lambda wait function-active \
+                            --function-name novabank-${ENV}-db-init \
+                            --region ${AWS_REGION}
+
+                        # ارفع الـ zip الجديد المبني بـ python3.12
+                        aws lambda update-function-code \
+                            --function-name novabank-${ENV}-db-init \
+                            --zip-file fileb://$ZIP_PATH \
+                            --region ${AWS_REGION} \
+                            --query 'FunctionArn' \
+                            --output text
+
+                        # انتظر الـ update يخلص قبل ما نكمل
+                        aws lambda wait function-updated \
+                            --function-name novabank-${ENV}-db-init \
+                            --region ${AWS_REGION}
+
+                        echo "✅ Lambda deployed successfully"
+                    '''
+                }
+            }
+        }
+
+        // ── 11. ECR Login ───────────────────────────────────────
         stage('ECR Login') {
             steps {
                 withCredentials([
@@ -276,7 +277,7 @@ pipeline {
             }
         }
 
-        // ── 11. Build & Push Docker Images ─────────────────────
+        // ── 12. Build & Push Docker Images ─────────────────────
         stage('Build & Push Images') {
             steps {
                 withCredentials([
@@ -293,7 +294,7 @@ pipeline {
             }
         }
 
-        // ── 12. Init Database ──────────────────────────────────
+        // ── 13. Init Database ──────────────────────────────────
         stage('Init Database') {
             steps {
                 withCredentials([
@@ -325,7 +326,7 @@ pipeline {
             }
         }
 
-        // ── 13. Deploy ECS Services ────────────────────────────
+        // ── 14. Deploy ECS Services ────────────────────────────
         stage('Deploy ECS Services') {
             steps {
                 withCredentials([
@@ -348,7 +349,7 @@ pipeline {
             }
         }
 
-        // ── 14. Health Check ───────────────────────────────────
+        // ── 15. Health Check ───────────────────────────────────
         stage('Health Check') {
             steps {
                 withCredentials([
