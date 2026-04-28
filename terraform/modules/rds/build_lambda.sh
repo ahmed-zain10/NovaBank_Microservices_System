@@ -11,11 +11,14 @@ echo "Building DB Init Lambda package..."
 rm -rf "$BUILD_DIR" "$ZIP"
 mkdir -p "$BUILD_DIR"
 
-# Install psycopg2-binary compiled for Lambda (Amazon Linux 2023)
-pip install psycopg2-binary boto3 --target "$BUILD_DIR" --quiet \
-  --platform manylinux2014_x86_64 --only-binary=:all:
-
 cp "$DIR/db_init_lambda/index.py" "$BUILD_DIR/"
+
+# بناء جوه Docker بنفس بيئة Lambda بالظبط
+docker run --rm \
+  -v "$BUILD_DIR":/var/task \
+  -v "$DIR/db_init_lambda":/src \
+  public.ecr.aws/lambda/python:3.11 \
+  bash -c "pip install psycopg2-binary boto3 -t /var/task/ --quiet && cp /src/index.py /var/task/"
 
 cd "$BUILD_DIR"
 zip -r "$ZIP" . -q
