@@ -31,7 +31,7 @@ pipeline {
                     set -e
 
                     echo "=== Installing base packages ==="
-                    sudo apt-get update -y
+                    sudo apt-get update -y --allow-insecure-repositories || true
                     sudo apt-get install -y zip unzip jq python3
 
                     echo "=== Checking dependencies ==="
