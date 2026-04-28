@@ -126,7 +126,7 @@ pipeline {
                         cd ${TF_DIR}
 
                         # انسخ الـ tfvars من Jenkins Credentials
-                        cp "$TFVARS_FILE" terraform.tfvars
+                        rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
 
                         mkdir -p $HOME/.terraform.d/plugin-cache
                         export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
@@ -149,7 +149,7 @@ pipeline {
                         echo "=== Import existing secrets (if any) ==="
                         cd ${TF_DIR}
 
-                        cp "$TFVARS_FILE" terraform.tfvars
+                        rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
 
                         # دالة تعمل import لو الـ secret موجود على AWS
                         # لو موجود في الـ state خلاص بتتجاهله بسبب || true
@@ -193,7 +193,7 @@ pipeline {
                     sh '''
                         echo "=== Terraform Plan ==="
                         cd ${TF_DIR}
-                        cp "$TFVARS_FILE" terraform.tfvars
+                        rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
 
                         terraform plan \
                             -var-file=terraform.tfvars \
