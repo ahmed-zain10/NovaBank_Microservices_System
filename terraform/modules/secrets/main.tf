@@ -13,7 +13,7 @@ resource "random_password" "rds_master" {
 resource "aws_secretsmanager_secret" "rds_master" {
   name                    = "${var.project}/${var.env}/rds/master"
   description             = "NovaBank RDS master credentials"
-  recovery_window_in_days = var.env == "prod" ? 30 : 7
+  recovery_window_in_days = var.env == "prod" ? 30 : 0
 
   tags = var.tags
 }
@@ -42,7 +42,7 @@ resource "aws_secretsmanager_secret" "schema_creds" {
   for_each                = toset(local.schemas)
   name                    = "${var.project}/${var.env}/rds/${each.key}"
   description             = "NovaBank ${each.key} schema DB credentials"
-  recovery_window_in_days = var.env == "prod" ? 30 : 7
+  recovery_window_in_days = var.env == "prod" ? 30 : 0
 
   tags = var.tags
 }
@@ -67,7 +67,7 @@ resource "random_password" "jwt_secret" {
 resource "aws_secretsmanager_secret" "jwt" {
   name                    = "${var.project}/${var.env}/jwt-secret"
   description             = "NovaBank JWT signing secret"
-  recovery_window_in_days = var.env == "prod" ? 30 : 7
+  recovery_window_in_days = var.env == "prod" ? 30 : 0
 
   tags = var.tags
 }
