@@ -52,6 +52,17 @@ ensure_ecr_repo() {
   fi
 }
 
+# ── Helper: Check if image tag already exists in ECR ──────────────────────────
+ecr_tag_exists() {
+  local repo="${1}"
+  local tag="${2}"
+  aws ecr describe-images \
+    --region "${REGION}" \
+    --repository-name "${repo}" \
+    --image-ids imageTag="${tag}" \
+    >/dev/null 2>&1
+}
+
 # ── Helper: Push with retry ────────────────────────────────────────────────────
 push_with_retry() {
   local image="${1}"
@@ -80,12 +91,19 @@ retag_latest_in_ecr() {
     --image-ids imageTag="${source_tag}" \
     --query 'images[].imageManifest' \
     --output text)
+
+  # Delete existing 'latest' first (required when immutable tags are enabled)
+  aws ecr batch-delete-image \
+    --region "${REGION}" \
+    --repository-name "${repo}" \
+    --image-ids imageTag=latest \
+    >/dev/null 2>&1 || true
+
   aws ecr put-image \
     --region "${REGION}" \
     --repository-name "${repo}" \
     --image-tag latest \
-    --image-manifest "${manifest}" \
-    --force || true
+    --image-manifest "${manifest}" >/dev/null
   echo "  ✅ latest tag updated"
 }
 
@@ -204,13 +222,17 @@ for SVC_NAME in "${!BUILD_IMAGES[@]}"; do
   # Fix 1: Ensure ECR repo exists before pushing
   ensure_ecr_repo "${REPO}"
 
-  # Fix 2 + 5: Push versioned tag with retry
-  echo "  📤 Pushing ${IMAGE_TAG}..."
-  if push_with_retry "${FULL_IMAGE}"; then
-    echo "  ✅ Pushed ${IMAGE_TAG}"
+  # Skip push if tag already exists in ECR (immutable tags policy)
+  if ecr_tag_exists "${REPO}" "${IMAGE_TAG}"; then
+    echo "  ⏭  Tag ${IMAGE_TAG} already exists in ECR, skipping push."
   else
-    FAILED+=("${SVC_NAME}")
-    continue
+    echo "  📤 Pushing ${IMAGE_TAG}..."
+    if push_with_retry "${FULL_IMAGE}"; then
+      echo "  ✅ Pushed ${IMAGE_TAG}"
+    else
+      FAILED+=("${SVC_NAME}")
+      continue
+    fi
   fi
 
   # Fix 2: Tag strategy — dev gets latest, staging/prod gets SHA only
