@@ -19,6 +19,9 @@ REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="${SCRIPT_DIR}/../.."
 
+# ── Frontend services (require multi-stage Dockerfile check) ──────────────────
+FRONTEND_SERVICES=("frontend-customers" "frontend-teller")
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "🐳 NovaBank Docker Build & Push"
 echo "   ENV:        ${ENV}"
@@ -35,6 +38,76 @@ aws ecr get-login-password --region "${REGION}" | \
   docker login --username AWS --password-stdin "${REGISTRY}"
 echo "   ✅ ECR login successful"
 
+# ── Helper: Ensure ECR repo exists ────────────────────────────────────────────
+ensure_ecr_repo() {
+  local repo="${1}"
+  if ! aws ecr describe-repositories \
+        --region "${REGION}" \
+        --repository-names "${repo}" >/dev/null 2>&1; then
+    echo "  📦 Creating ECR repo: ${repo}"
+    aws ecr create-repository \
+      --region "${REGION}" \
+      --repository-name "${repo}" >/dev/null
+    echo "  ✅ Repo created"
+  fi
+}
+
+# ── Helper: Push with retry ────────────────────────────────────────────────────
+push_with_retry() {
+  local image="${1}"
+  local max_attempts=3
+  local attempt=1
+  until docker push "${image}"; do
+    if [ "${attempt}" -ge "${max_attempts}" ]; then
+      echo "  ❌ Push failed after ${max_attempts} attempts: ${image}"
+      return 1
+    fi
+    echo "  ⚠️  Push failed (attempt ${attempt}/${max_attempts}), retrying in 5s..."
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+}
+
+# ── Helper: Update 'latest' tag in ECR via re-tag ─────────────────────────────
+retag_latest_in_ecr() {
+  local repo="${1}"
+  local source_tag="${2}"
+  echo "  📤 Updating latest tag in ECR (re-tag from ${source_tag})..."
+  local manifest
+  manifest=$(aws ecr batch-get-image \
+    --region "${REGION}" \
+    --repository-name "${repo}" \
+    --image-ids imageTag="${source_tag}" \
+    --query 'images[].imageManifest' \
+    --output text)
+  aws ecr put-image \
+    --region "${REGION}" \
+    --repository-name "${repo}" \
+    --image-tag latest \
+    --image-manifest "${manifest}" \
+    --force || true
+  echo "  ✅ latest tag updated"
+}
+
+# ── Helper: Check if frontend Dockerfile is multi-stage ───────────────────────
+check_multistage_dockerfile() {
+  local svc_name="${1}"
+  local dockerfile="${2}"
+  local is_frontend=false
+  for fs in "${FRONTEND_SERVICES[@]}"; do
+    [ "${fs}" = "${svc_name}" ] && is_frontend=true && break
+  done
+  if ${is_frontend}; then
+    local stage_count
+    stage_count=$(grep -ci "^FROM" "${dockerfile}" || true)
+    if [ "${stage_count}" -lt 2 ]; then
+      echo "  ⚠️  WARNING: ${svc_name} is a frontend service but Dockerfile"
+      echo "      has only 1 FROM stage. Consider multi-stage build with"
+      echo "      a build stage + nginx serve stage to reduce image size."
+    fi
+  fi
+}
+
 # ── Service definitions ────────────────────────────────────────────────────────
 # Format: "service_name:context_path:dockerfile_path"
 declare -a SERVICES=(
@@ -48,53 +121,109 @@ declare -a SERVICES=(
 )
 
 FAILED=()
+declare -A BUILD_PIDS    # service_name → background PID
+declare -A BUILD_IMAGES  # service_name → full image name
+declare -A BUILD_REPOS   # service_name → ECR repo name
+
+# ── Phase 1: Parallel builds ───────────────────────────────────────────────────
+echo ""
+echo "🔨 Phase 1: Building all services in parallel..."
+echo ""
 
 for svc_def in "${SERVICES[@]}"; do
   IFS=':' read -r SVC_NAME CONTEXT DOCKERFILE <<< "${svc_def}"
   REPO="${PROJECT}/${ENV}/${SVC_NAME}"
   FULL_IMAGE="${REGISTRY}/${REPO}:${IMAGE_TAG}"
-  LATEST_IMAGE="${REGISTRY}/${REPO}:latest"
 
-  echo ""
-  echo "▶ Building ${SVC_NAME}..."
-  echo "  Context:    ${CONTEXT}"
-  echo "  Dockerfile: ${DOCKERFILE}"
-  echo "  Image:      ${FULL_IMAGE}"
+  BUILD_IMAGES["${SVC_NAME}"]="${FULL_IMAGE}"
+  BUILD_REPOS["${SVC_NAME}"]="${REPO}"
 
   if [ ! -f "${DOCKERFILE}" ]; then
-    echo "  ⚠️  Dockerfile not found at ${DOCKERFILE}, skipping."
+    echo "  ⚠️  Dockerfile not found for ${SVC_NAME}, skipping."
     FAILED+=("${SVC_NAME}")
     continue
   fi
 
-  # Build
-  if docker build \
-    --platform linux/amd64 \
-    --file "${DOCKERFILE}" \
-    --tag "${FULL_IMAGE}" \
-    --tag "${LATEST_IMAGE}" \
-    --build-arg ENV="${ENV}" \
-    --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --build-arg GIT_SHA="${IMAGE_TAG}" \
-    "${CONTEXT}"; then
+  check_multistage_dockerfile "${SVC_NAME}" "${DOCKERFILE}"
 
-    # Push versioned tag
-    echo "  📤 Pushing ${IMAGE_TAG}..."
-    docker push "${FULL_IMAGE}"
+  echo "  🚀 Starting build: ${SVC_NAME}"
 
-    # Also push 'latest' tag (useful for dev)
-    if [ "${ENV}" = "dev" ]; then
-      echo "  📤 Pushing latest..."
-      docker push "${LATEST_IMAGE}"
-    fi
+  # Build in background with cache-from latest
+  (
+    docker build \
+      --platform linux/amd64 \
+      --file "${DOCKERFILE}" \
+      --tag "${FULL_IMAGE}" \
+      --cache-from "${REGISTRY}/${REPO}:latest" \
+      --build-arg ENV="${ENV}" \
+      --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --build-arg GIT_SHA="${IMAGE_TAG}" \
+      "${CONTEXT}" \
+      > "/tmp/build_${SVC_NAME}.log" 2>&1
+  ) &
 
-    echo "  ✅ ${SVC_NAME} pushed successfully"
-  else
-    echo "  ❌ Build failed for ${SVC_NAME}"
-    FAILED+=("${SVC_NAME}")
-  fi
+  BUILD_PIDS["${SVC_NAME}"]=$!
 done
 
+# ── Wait for all builds and collect results ────────────────────────────────────
+echo ""
+echo "⏳ Waiting for all builds to complete..."
+echo ""
+
+for SVC_NAME in "${!BUILD_PIDS[@]}"; do
+  PID="${BUILD_PIDS[$SVC_NAME]}"
+  if wait "${PID}"; then
+    echo "  ✅ Build succeeded: ${SVC_NAME}"
+  else
+    echo "  ❌ Build failed:    ${SVC_NAME}"
+    echo "  ── Build log ──────────────────────────────"
+    cat "/tmp/build_${SVC_NAME}.log" || true
+    echo "  ───────────────────────────────────────────"
+    FAILED+=("${SVC_NAME}")
+  fi
+  rm -f "/tmp/build_${SVC_NAME}.log"
+done
+
+# ── Phase 2: Sequential push (ECR check + push + tag) ─────────────────────────
+echo ""
+echo "📤 Phase 2: Pushing images to ECR..."
+echo ""
+
+for SVC_NAME in "${!BUILD_IMAGES[@]}"; do
+  # Skip services that failed to build
+  if printf '%s\n' "${FAILED[@]}" | grep -q "^${SVC_NAME}$"; then
+    echo "  ⏭  Skipping push for ${SVC_NAME} (build failed)"
+    continue
+  fi
+
+  FULL_IMAGE="${BUILD_IMAGES[$SVC_NAME]}"
+  REPO="${BUILD_REPOS[$SVC_NAME]}"
+
+  echo "▶ Pushing ${SVC_NAME}..."
+
+  # Fix 1: Ensure ECR repo exists before pushing
+  ensure_ecr_repo "${REPO}"
+
+  # Fix 2 + 5: Push versioned tag with retry
+  echo "  📤 Pushing ${IMAGE_TAG}..."
+  if push_with_retry "${FULL_IMAGE}"; then
+    echo "  ✅ Pushed ${IMAGE_TAG}"
+  else
+    FAILED+=("${SVC_NAME}")
+    continue
+  fi
+
+  # Fix 2: Tag strategy — dev gets latest, staging/prod gets SHA only
+  if [ "${ENV}" = "dev" ]; then
+    retag_latest_in_ecr "${REPO}" "${IMAGE_TAG}"
+  else
+    echo "  ℹ️  ENV=${ENV}: skipping latest tag (SHA-only policy for staging/prod)"
+  fi
+
+  echo "  ✅ ${SVC_NAME} done"
+done
+
+# ── Summary ────────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ ${#FAILED[@]} -eq 0 ]; then
