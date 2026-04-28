@@ -85,7 +85,6 @@ yarn-error.log*
 *.key
 *.crt
 *.cert
-secrets/
 ssl/
 
 # ── Test Coverage ────────────────────
