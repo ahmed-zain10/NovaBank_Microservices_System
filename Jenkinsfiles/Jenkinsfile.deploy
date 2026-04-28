@@ -31,27 +31,41 @@ pipeline {
                 sh '''
                     echo "=== Checking dependencies ==="
 
-                    if ! command -v aws &>/dev/null; then
+                    # AWS CLI — لو موجودة نعمل update، لو مش موجودة نعمل install
+                    if command -v aws &>/dev/null; then
+                        echo "AWS CLI already installed: $(aws --version)"
+                    else
                         echo "Installing AWS CLI..."
                         sudo rm -rf /tmp/aws /tmp/awscliv2.zip
                         curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
                         unzip -q /tmp/awscliv2.zip -d /tmp
-                        sudo /tmp/aws/install
+                        sudo /tmp/aws/install --update
                         sudo rm -rf /tmp/aws /tmp/awscliv2.zip
+                        echo "AWS CLI installed: $(aws --version)"
                     fi
-                    aws --version
 
-                    if ! command -v terraform &>/dev/null; then
+                    # Terraform
+                    if command -v terraform &>/dev/null; then
+                        echo "Terraform already installed: $(terraform version -json | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"terraform_version\"])')"
+                    else
                         echo "Installing Terraform..."
                         curl -fsSL "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" \
                             -o /tmp/terraform.zip
                         sudo unzip -q /tmp/terraform.zip -d /usr/local/bin
                         sudo chmod +x /usr/local/bin/terraform
                         rm -f /tmp/terraform.zip
+                        echo "Terraform installed"
                     fi
                     terraform --version
 
-                    docker --version
+                    # Docker
+                    if command -v docker &>/dev/null; then
+                        echo "Docker already installed: $(docker --version)"
+                    else
+                        echo "❌ Docker not found — ده لازم يكون مثبت على الـ Jenkins server"
+                        exit 1
+                    fi
+
                     echo "✅ All dependencies ready"
                 '''
             }
@@ -137,6 +151,8 @@ pipeline {
 
                         cp "$TFVARS_FILE" terraform.tfvars
 
+                        # دالة تعمل import لو الـ secret موجود على AWS
+                        # لو موجود في الـ state خلاص بتتجاهله بسبب || true
                         tf_import_if_exists() {
                             TF_ADDR="$1"
                             AWS_SECRET_ID="$2"
@@ -150,7 +166,7 @@ pipeline {
                                     -var="image_tag=${IMAGE_TAG}" \
                                     "$TF_ADDR" "$AWS_SECRET_ID" 2>&1 || true
                             else
-                                echo "  → Not found, will create: $AWS_SECRET_ID"
+                                echo "  → Not found on AWS, will create: $AWS_SECRET_ID"
                             fi
                         }
 
@@ -246,6 +262,8 @@ pipeline {
                 ]) {
                     sh '''
                         echo "=== Initializing Database ==="
+
+                        # انتظر الـ Lambda تكون active
                         aws lambda wait function-active \
                             --function-name novabank-dev-db-init \
                             --region ${AWS_REGION}
@@ -256,6 +274,7 @@ pipeline {
                             /tmp/db-result.json
 
                         cat /tmp/db-result.json
+
                         STATUS=$(python3 -c "import json; d=json.load(open('/tmp/db-result.json')); print(d.get('statusCode',500))")
                         if [ "$STATUS" != "200" ]; then
                             echo "❌ DB init failed!"
@@ -348,6 +367,7 @@ pipeline {
 
     post {
         always {
+            // احذف الـ tfvars والـ tfplan من الـ workspace عشان الأمان
             sh 'rm -f /tmp/db-result.json ${TF_DIR}/tfplan ${TF_DIR}/terraform.tfvars || true'
         }
         success {
