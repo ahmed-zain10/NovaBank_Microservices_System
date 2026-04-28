@@ -29,10 +29,11 @@ pipeline {
                     # AWS CLI
                     if ! command -v aws &>/dev/null; then
                         echo "Installing AWS CLI..."
+                        sudo rm -rf /tmp/aws /tmp/awscliv2.zip
                         curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
                         unzip -q /tmp/awscliv2.zip -d /tmp
                         sudo /tmp/aws/install
-                        rm -rf /tmp/aws /tmp/awscliv2.zip
+                        sudo rm -rf /tmp/aws /tmp/awscliv2.zip
                     fi
                     aws --version
 
@@ -41,9 +42,9 @@ pipeline {
                         echo "Installing Terraform..."
                         curl -fsSL "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" \
                             -o /tmp/terraform.zip
-                        unzip -q /tmp/terraform.zip -d /usr/local/bin
-                        chmod +x /usr/local/bin/terraform
-                        rm /tmp/terraform.zip
+                        sudo unzip -q /tmp/terraform.zip -d /usr/local/bin
+                        sudo chmod +x /usr/local/bin/terraform
+                        rm -f /tmp/terraform.zip
                     fi
                     terraform --version
 
