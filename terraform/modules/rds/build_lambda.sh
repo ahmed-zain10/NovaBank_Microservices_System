@@ -6,24 +6,20 @@ ZIP="$DIR/db_init_lambda.zip"
 
 echo "Building DB Init Lambda package..."
 
-# حذف المجلد القديم حتى لو كان owned by root
+# حذف المجلد القديم
 if [ -d "$BUILD_DIR" ]; then
-    docker run --rm -v "$DIR":/workspace public.ecr.aws/lambda/python:3.12 \
-        bash -c "rm -rf /workspace/db_init_build"
+    rm -rf "$BUILD_DIR"
 fi
 mkdir -p "$BUILD_DIR"
 
 cp "$DIR/db_init_lambda/index.py" "$BUILD_DIR/"
 
-# بناء الـ packages داخل Lambda python3.12 environment
+# بناء الـ packages بـ python3.12 متوافق مع Lambda runtime
 docker run --rm \
+    --entrypoint pip \
     -v "$BUILD_DIR":/var/task \
     public.ecr.aws/lambda/python:3.12 \
-    pip install psycopg2-binary boto3 -t /var/task/ --quiet
-
-# تغيير الـ ownership لـ jenkins
-docker run --rm -v "$DIR":/workspace public.ecr.aws/lambda/python:3.12 \
-    bash -c "chown -R $(id -u):$(id -g) /workspace/db_init_build" 2>/dev/null || true
+    install psycopg2-binary boto3 -t /var/task/ --quiet
 
 cd "$BUILD_DIR"
 zip -r "$ZIP" . -q
