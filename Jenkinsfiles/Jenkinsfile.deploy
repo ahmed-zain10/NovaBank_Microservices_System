@@ -30,6 +30,10 @@ pipeline {
                 sh '''
                     set -e
 
+                    echo "=== Installing base packages ==="
+                    sudo apt-get update -y
+                    sudo apt-get install -y zip unzip jq python3
+
                     echo "=== Checking dependencies ==="
 
                     # AWS CLI
@@ -55,8 +59,8 @@ pipeline {
                     fi
                     terraform --version
 
-                    # Docker
-                    docker --version || (echo "Docker not found" && exit 1)
+                    # Docker check
+                    docker --version || (echo "❌ Docker not found" && exit 1)
 
                     echo "✅ Dependencies ready"
                 '''
@@ -82,7 +86,7 @@ pipeline {
                         echo "=== AWS Identity ==="
                         aws sts get-caller-identity
 
-                        # Bootstrap
+                        # ── Bootstrap ─────────────────────
                         echo "=== Bootstrap State ==="
                         cd terraform/scripts
                         BUCKET="novabank-terraform-state-dev"
@@ -94,13 +98,13 @@ pipeline {
                             ./bootstrap_state.sh dev ${AWS_REGION}
                         fi
 
-                        # Build Lambda
+                        # ── Build Lambda ──────────────────
                         echo "=== Build Lambda ==="
                         cd ../modules/rds
                         chmod +x build_lambda.sh
                         ./build_lambda.sh
 
-                        # Terraform
+                        # ── Terraform ─────────────────────
                         echo "=== Terraform ==="
                         cd ../../envs/dev
 
@@ -115,18 +119,18 @@ pipeline {
 
                         terraform apply -auto-approve tfplan
 
-                        # ECR Login
+                        # ── ECR Login ────────────────────
                         echo "=== ECR Login ==="
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${REGISTRY}
 
-                        # Push Images
+                        # ── Push Images ──────────────────
                         echo "=== Push Images ==="
                         cd ../../scripts
                         chmod +x push_images.sh
                         ./push_images.sh ${ENV} ${AWS_REGION} ${AWS_ACCOUNT_ID} ${IMAGE_TAG}
 
-                        # Lambda Init
+                        # ── Lambda Init ──────────────────
                         echo "=== Init DB ==="
                         aws lambda wait function-active \
                           --function-name novabank-dev-db-init \
@@ -140,11 +144,11 @@ pipeline {
                         STATUS=$(python3 -c "import json; print(json.load(open('/tmp/db-result.json')).get('statusCode',500))")
 
                         if [ "$STATUS" != "200" ]; then
-                          echo "DB init failed"
+                          echo "❌ DB init failed"
                           exit 1
                         fi
 
-                        # ECS Deploy
+                        # ── ECS Deploy ───────────────────
                         echo "=== ECS Deploy ==="
                         SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
 
@@ -157,7 +161,6 @@ pipeline {
                         done
 
                         echo "Waiting for ECS stability..."
-                        sleep 30
 
                         for svc in $SERVICES; do
                             aws ecs wait services-stable \
@@ -167,6 +170,8 @@ pipeline {
 
                             echo "✅ $svc stable"
                         done
+
+                        echo "🚀 DEPLOY DONE"
                     '''
                 }
             }
