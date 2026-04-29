@@ -411,3 +411,4 @@ def update_account(account_id: str, data: dict):
             cur.execute(f"UPDATE accounts SET {','.join(fields)},updated_at=NOW() WHERE id=%s",vals)
         c.commit()
     return {"ok":True}
+
