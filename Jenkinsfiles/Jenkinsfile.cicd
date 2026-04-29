@@ -27,16 +27,29 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 sh '''
+                    echo "=== Checking dependencies ==="
+
                     # AWS CLI
-                    if ! command -v aws &>/dev/null; then
+                    if command -v aws &>/dev/null; then
+                        echo "AWS CLI already installed: $(aws --version)"
+                    else
+                        echo "Installing AWS CLI..."
+                        sudo rm -rf /tmp/aws /tmp/awscliv2.zip
                         curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
                         unzip -q /tmp/awscliv2.zip -d /tmp
-                        sudo /tmp/aws/install
-                        rm -rf /tmp/aws /tmp/awscliv2.zip
+                        sudo /tmp/aws/install --update
+                        sudo rm -rf /tmp/aws /tmp/awscliv2.zip
+                        echo "AWS CLI installed: $(aws --version)"
                     fi
+
                     # Docker
-                    docker --version
-                    aws --version
+                    if command -v docker &>/dev/null; then
+                        echo "Docker already installed: $(docker --version)"
+                    else
+                        echo "❌ Docker not found — لازم يكون مثبت على الـ Jenkins server"
+                        exit 1
+                    fi
+
                     echo "✅ Dependencies ready"
                 '''
             }
