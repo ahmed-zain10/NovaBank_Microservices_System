@@ -21,25 +21,35 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 sh '''
+                    echo "=== Checking dependencies ==="
+
                     # AWS CLI
-                    if ! command -v aws &>/dev/null; then
+                    if command -v aws &>/dev/null; then
+                        echo "AWS CLI already installed: $(aws --version)"
+                    else
+                        echo "Installing AWS CLI..."
+                        sudo rm -rf /tmp/aws /tmp/awscliv2.zip
                         curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
                         unzip -q /tmp/awscliv2.zip -d /tmp
-                        sudo /tmp/aws/install
-                        rm -rf /tmp/aws /tmp/awscliv2.zip
+                        sudo /tmp/aws/install --update
+                        sudo rm -rf /tmp/aws /tmp/awscliv2.zip
+                        echo "AWS CLI installed: $(aws --version)"
                     fi
 
                     # Terraform
-                    if ! command -v terraform &>/dev/null; then
+                    if command -v terraform &>/dev/null; then
+                        echo "Terraform already installed: $(terraform version -json | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"terraform_version\"])' )"
+                    else
+                        echo "Installing Terraform..."
                         curl -fsSL "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" \
                             -o /tmp/terraform.zip
-                        unzip -q /tmp/terraform.zip -d /usr/local/bin
-                        chmod +x /usr/local/bin/terraform
-                        rm /tmp/terraform.zip
+                        sudo unzip -q /tmp/terraform.zip -d /usr/local/bin
+                        sudo chmod +x /usr/local/bin/terraform
+                        rm -f /tmp/terraform.zip
+                        echo "Terraform installed"
                     fi
-
-                    aws --version
                     terraform --version
+
                     echo "✅ Dependencies ready"
                 '''
             }
@@ -55,6 +65,9 @@ pipeline {
         // ── 3. Show What Will Be Destroyed ────────────────────
         stage('Show Resources') {
             steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
                 sh '''
                     echo "======================================"
                     echo "⚠️  RESOURCES THAT WILL BE DESTROYED"
@@ -94,30 +107,32 @@ pipeline {
                     echo "⚠️  ALL OF THE ABOVE WILL BE DELETED!"
                     echo "======================================"
                 '''
+                }
             }
         }
 
         // ── 4. MANUAL APPROVAL ─────────────────────────────────
         stage('⚠️ Manual Approval') {
             steps {
-                timeout(time: 30, unit: 'MINUTES') {
-                    input(
-                        message: '⚠️ هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟\nده مش ممكن يتراجع!',
-                        ok: '✅ نعم، امسح كل حاجة',
-                        submitter: 'admin',
-                        parameters: [
-                            string(
-                                name: 'CONFIRM',
-                                defaultValue: '',
-                                description: 'اكتب "DESTROY" للتأكيد'
-                            )
-                        ]
-                    )
-                }
                 script {
-                    if (params.CONFIRM != 'DESTROY') {
+                    def userInput = timeout(time: 30, unit: 'MINUTES') {
+                        input(
+                            message: '⚠️ هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟\nده مش ممكن يتراجع!',
+                            ok: '✅ نعم، امسح كل حاجة',
+                            submitter: 'admin',
+                            parameters: [
+                                string(
+                                    name: 'CONFIRM',
+                                    defaultValue: '',
+                                    description: 'اكتب "DESTROY" للتأكيد'
+                                )
+                            ]
+                        )
+                    }
+                    if (userInput?.CONFIRM != 'DESTROY') {
                         error('❌ لازم تكتب "DESTROY" للتأكيد')
                     }
+                    echo '✅ Confirmed — proceeding with destruction'
                 }
             }
         }
@@ -125,6 +140,9 @@ pipeline {
         // ── 5. Stop ECS Services ───────────────────────────────
         stage('Stop ECS Services') {
             steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
                 sh '''
                     echo "=== Stopping ECS Services ==="
                     SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
@@ -142,12 +160,16 @@ pipeline {
                     sleep 30
                     echo "✅ ECS services stopped"
                 '''
+                }
             }
         }
 
         // ── 6. Clear ECR Images ────────────────────────────────
         stage('Clear ECR Images') {
             steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
                 sh '''
                     echo "=== Clearing ECR Images ==="
                     REPOS="accounts-service api-gateway auth-service transactions-service notifications-service frontend-customers frontend-teller"
@@ -174,49 +196,67 @@ pipeline {
 
                     echo "✅ ECR cleared"
                 '''
+                }
             }
         }
 
         // ── 7. Terraform Init ──────────────────────────────────
         stage('Terraform Init') {
             steps {
-                sh '''
-                    echo "=== Terraform Init ==="
-                    cd ${TF_DIR}
-                    terraform init -reconfigure || \
-                    terraform init -reconfigure -lock=false
-                    echo "✅ Terraform initialized"
-                '''
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds'],
+                    file(credentialsId: 'terraform-tfvars-dev', variable: 'TFVARS_FILE')
+                ]) {
+                    sh '''
+                        echo "=== Terraform Init ==="
+                        cd ${TF_DIR}
+                        rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
+                        mkdir -p $HOME/.terraform.d/plugin-cache
+                        export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
+                        terraform init -reconfigure ||                         terraform init -reconfigure -lock=false
+                        echo "✅ Terraform initialized"
+                    '''
+                }
             }
         }
 
         // ── 8. Terraform Destroy ───────────────────────────────
         stage('Terraform Destroy') {
             steps {
-                sh '''
-                    echo "=== Terraform Destroy ==="
-                    cd ${TF_DIR}
-                    terraform destroy \
-                        -var-file=terraform.tfvars \
-                        -auto-approve \
-                        2>&1 | tee /tmp/destroy-output.txt
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds'],
+                    file(credentialsId: 'terraform-tfvars-dev', variable: 'TFVARS_FILE')
+                ]) {
+                    sh '''
+                        echo "=== Terraform Destroy ==="
+                        cd ${TF_DIR}
+                        rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
 
-                    DESTROY_STATUS=${PIPESTATUS[0]}
-                    if [ $DESTROY_STATUS -ne 0 ]; then
-                        echo "⚠️ Terraform destroy had errors — trying with -lock=false"
                         terraform destroy \
                             -var-file=terraform.tfvars \
                             -auto-approve \
-                            -lock=false
-                    fi
-                    echo "✅ Infrastructure destroyed"
-                '''
+                            2>&1 | tee /tmp/destroy-output.txt
+
+                        DESTROY_STATUS=${PIPESTATUS[0]}
+                        if [ $DESTROY_STATUS -ne 0 ]; then
+                            echo "⚠️ Terraform destroy had errors — trying with -lock=false"
+                            terraform destroy \
+                                -var-file=terraform.tfvars \
+                                -auto-approve \
+                                -lock=false
+                        fi
+                        echo "✅ Infrastructure destroyed"
+                    '''
+                }
             }
         }
 
         // ── 9. Delete S3 State Bucket ──────────────────────────
         stage('Delete State Bucket') {
             steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
                 sh '''
                     echo "=== Deleting S3 State Bucket ==="
                     BUCKET="${STATE_BUCKET}"
@@ -234,19 +274,13 @@ pipeline {
                                 --output json 2>/dev/null || echo "[]")
 
                             if [ "$ITEMS" != "[]" ] && [ "$ITEMS" != "null" ]; then
-                                python3 -c "
-import json, subprocess, sys
-items = json.loads('''$ITEMS''')
-if not items:
-    sys.exit(0)
-result = subprocess.run([
-    'aws', 's3api', 'delete-objects',
-    '--bucket', '$BUCKET',
-    '--delete', json.dumps({'Objects': items, 'Quiet': True}),
-    '--region', '${AWS_REGION}'
-], capture_output=True)
-print(f'Deleted {len(items)} {\"$TYPE\"}')
-" 2>/dev/null || true
+                                DELETE_PAYLOAD=$(echo "$ITEMS" | python3 -c "
+import json,sys
+items=json.load(sys.stdin)
+print(json.dumps({'Objects':items,'Quiet':True}))
+")
+                                aws s3api delete-objects                                     --bucket "$BUCKET"                                     --delete "$DELETE_PAYLOAD"                                     --region ${AWS_REGION} >/dev/null 2>&1 || true
+                                echo "  Deleted $TYPE"
                             fi
                         done
 
@@ -257,26 +291,34 @@ print(f'Deleted {len(items)} {\"$TYPE\"}')
                         echo "✅ State bucket deleted"
                     fi
                 '''
+                }
             }
         }
 
         // ── 10. Delete DynamoDB Lock Table ─────────────────────
         stage('Delete Lock Table') {
             steps {
-                sh '''
-                    echo "=== Deleting DynamoDB Lock Table ==="
-                    aws dynamodb delete-table \
-                        --table-name ${LOCK_TABLE} \
-                        --region ${AWS_REGION} 2>/dev/null || \
-                    echo "ℹ️ Lock table doesn't exist or already deleted"
-                    echo "✅ Lock table deleted"
-                '''
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    sh '''
+                        echo "=== Deleting DynamoDB Lock Table ==="
+                        aws dynamodb delete-table \
+                            --table-name ${LOCK_TABLE} \
+                            --region ${AWS_REGION} 2>/dev/null || \
+                        echo "ℹ️ Lock table doesn't exist or already deleted"
+                        echo "✅ Lock table deleted"
+                    '''
+                }
             }
         }
 
         // ── 11. Verify Destruction ─────────────────────────────
         stage('Verify Destruction') {
             steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
                 sh '''
                     echo "=== Verifying Destruction ==="
 
@@ -303,6 +345,7 @@ print(f'Deleted {len(items)} {\"$TYPE\"}')
                     echo "   Env:     ${ENV}"
                     echo "======================================"
                 '''
+                }
             }
         }
     }
