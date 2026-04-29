@@ -249,7 +249,7 @@ for c in t['containerDefinitions']:
     old_image = c['image']
     new_image = old_image.rsplit(':',1)[0] + ':${env.IMAGE_TAG}'
     c['image'] = new_image
-    print(f'  Image: {old_image} -> {new_image}', flush=True)
+    print(f'  Image: {old_image} -> {new_image}', file=sys.stderr, flush=True)
 print(json.dumps(t))
 ")
 
