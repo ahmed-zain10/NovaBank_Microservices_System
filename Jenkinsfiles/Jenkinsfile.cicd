@@ -119,11 +119,15 @@ pipeline {
                 expression { env.SERVICES_TO_BUILD?.trim() }
             }
             steps {
-                sh '''
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${REGISTRY}
-                    echo "✅ ECR login successful"
-                '''
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    sh '''
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                            docker login --username AWS --password-stdin ${REGISTRY}
+                        echo "✅ ECR login successful"
+                    '''
+                }
             }
         }
 
@@ -133,31 +137,64 @@ pipeline {
                 expression { env.SERVICES_TO_BUILD?.trim() }
             }
             steps {
-                script {
-                    def services = env.SERVICES_TO_BUILD.split(' ')
-                    def serviceMap = [
-                        'auth-service'         : [port: '8001', base: 'python:3.12-slim'],
-                        'accounts-service'     : [port: '8002', base: 'python:3.12-slim'],
-                        'transactions-service' : [port: '8003', base: 'python:3.12-slim'],
-                        'notifications-service': [port: '8004', base: 'python:3.12-slim'],
-                        'api-gateway'          : [port: '8000', base: 'python:3.12-slim'],
-                        'frontend-customers'   : [port: '80',   base: 'nginx:1.27-alpine'],
-                        'frontend-teller'      : [port: '80',   base: 'nginx:1.27-alpine']
-                    ]
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    script {
+                        def services = env.SERVICES_TO_BUILD.split(' ')
 
-                    services.each { svc ->
-                        def imageUri = "${env.REGISTRY}/novabank/${env.ENV}/${svc}:${env.IMAGE_TAG}"
-                        echo "Building ${svc}..."
-                        sh """
-                            docker build \
-                                --build-arg ENV=${ENV} \
-                                --build-arg GIT_SHA=${env.IMAGE_TAG} \
-                                -t ${imageUri} \
-                                services/${svc}/
+                        services.each { svc ->
+                            def repo    = "novabank/${env.ENV}/${svc}"
+                            def imageUri = "${env.REGISTRY}/${repo}:${env.IMAGE_TAG}"
+                            def latestUri = "${env.REGISTRY}/${repo}:latest"
 
-                            docker push ${imageUri}
-                            echo "✅ ${svc} pushed: ${imageUri}"
-                        """
+                            echo "Building ${svc}..."
+
+                            // build مع cache-from latest
+                            sh """
+                                docker build \
+                                    --platform linux/amd64 \
+                                    --cache-from ${latestUri} \
+                                    --build-arg ENV=${ENV} \
+                                    --build-arg GIT_SHA=${env.IMAGE_TAG} \
+                                    -t ${imageUri} \
+                                    services/${svc}/
+                            """
+
+                            // push مع skip لو الـ tag موجود بالفعل (immutable tags)
+                            sh """
+                                if aws ecr describe-images \
+                                    --region ${AWS_REGION} \
+                                    --repository-name ${repo} \
+                                    --image-ids imageTag=${env.IMAGE_TAG} \
+                                    >/dev/null 2>&1; then
+                                    echo "⏭  Tag ${env.IMAGE_TAG} already exists — skipping push"
+                                else
+                                    docker push ${imageUri}
+                                fi
+
+                                # update latest tag in ECR via re-tag
+                                MANIFEST=\$(aws ecr batch-get-image \
+                                    --region ${AWS_REGION} \
+                                    --repository-name ${repo} \
+                                    --image-ids imageTag=${env.IMAGE_TAG} \
+                                    --query 'images[].imageManifest' \
+                                    --output text)
+
+                                aws ecr batch-delete-image \
+                                    --region ${AWS_REGION} \
+                                    --repository-name ${repo} \
+                                    --image-ids imageTag=latest >/dev/null 2>&1 || true
+
+                                aws ecr put-image \
+                                    --region ${AWS_REGION} \
+                                    --repository-name ${repo} \
+                                    --image-tag latest \
+                                    --image-manifest "\$MANIFEST" >/dev/null
+
+                                echo "✅ ${svc} pushed: ${imageUri}"
+                            """
+                        }
                     }
                 }
             }
@@ -169,11 +206,14 @@ pipeline {
                 expression { env.SERVICES_TO_BUILD?.trim() }
             }
             steps {
-                script {
-                    def services = env.SERVICES_TO_BUILD.split(' ')
-                    services.each { svc ->
-                        sh """
-                            echo "Updating task definition for ${svc}..."
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    script {
+                        def services = env.SERVICES_TO_BUILD.split(' ')
+                        services.each { svc ->
+                            sh """
+                                echo "Updating task definition for ${svc}..."
 
                             TASK_DEF=\$(aws ecs describe-services \
                                 --cluster ${CLUSTER} \
@@ -215,6 +255,7 @@ print(json.dumps(t))
 
                             echo "✅ ${svc} updated to ${env.IMAGE_TAG}"
                         """
+                        }
                     }
                 }
             }
@@ -226,12 +267,16 @@ print(json.dumps(t))
                 expression { env.SERVICES_TO_BUILD?.trim() }
             }
             steps {
-                sh '''
-                    echo "=== Waiting 90s for services to stabilize ==="
-                    sleep 90
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    withEnv(["SVCS=${env.SERVICES_TO_BUILD}"]) {
+                        sh '''
+                            echo "=== Waiting 90s for services to stabilize ==="
+                            sleep 90
 
                     FAILED=false
-                    for svc in ${SERVICES_TO_BUILD}; do
+                    for svc in ${SVCS}; do
                         RUNNING=$(aws ecs describe-services \
                             --cluster ${CLUSTER} \
                             --services novabank-dev-${svc} \
@@ -260,6 +305,8 @@ print(json.dumps(t))
 
                     echo "✅ All services healthy!"
                 '''
+                    }
+                }
             }
         }
 
