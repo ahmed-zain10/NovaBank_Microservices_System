@@ -38,7 +38,7 @@ pipeline {
 
                     # Terraform
                     if command -v terraform &>/dev/null; then
-                        echo "Terraform already installed: $(terraform version -json | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"terraform_version\"])' )"
+                        echo "Terraform already installed: $(terraform version -json | python3 -c 'import sys,json; print(json.load(sys.stdin)["terraform_version"])')"
                     else
                         echo "Installing Terraform..."
                         curl -fsSL "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" \
@@ -112,12 +112,12 @@ pipeline {
         }
 
         // ── 4. MANUAL APPROVAL ─────────────────────────────────
-        stage('⚠️ Manual Approval') {
+        stage('Manual Approval') {
             steps {
                 script {
                     timeout(time: 30, unit: 'MINUTES') {
                         input(
-                            message: '⚠️ تحذير: هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟ اضغط OK للمتابعة أو Abort للإلغاء.',
+                            message: 'تحذير: هل انت متاكد انك عايز تمسح كل الـ infrastructure؟ اضغط OK للمتابعة او Abort للالغاء.',
                             ok: 'نعم، امسح كل حاجة',
                             submitter: 'admin'
                         )
@@ -143,7 +143,7 @@ pipeline {
                             --service novabank-dev-${svc} \
                             --desired-count 0 \
                             --region ${AWS_REGION} > /dev/null 2>&1 || true
-                        echo "  ⏹ ${svc} stopped"
+                        echo "  ${svc} stopped"
                     done
 
                     echo "Waiting 30s for tasks to stop..."
@@ -173,7 +173,7 @@ pipeline {
                             --output json 2>/dev/null || echo "[]")
 
                         if [ "$IMAGE_IDS" = "[]" ] || [ "$IMAGE_IDS" = "null" ]; then
-                            echo "  ℹ️ ${repo}: no images"
+                            echo "  ${repo}: no images"
                             continue
                         fi
 
@@ -181,7 +181,7 @@ pipeline {
                             --repository-name "$FULL_REPO" \
                             --image-ids "$IMAGE_IDS" \
                             --region ${AWS_REGION} > /dev/null 2>&1 || true
-                        echo "  🗑️ ${repo}: images deleted"
+                        echo "  ${repo}: images deleted"
                     done
 
                     echo "✅ ECR cleared"
@@ -190,20 +190,9 @@ pipeline {
             }
         }
 
-        // ── 7. Build Lambda Zip (مطلوب عشان Terraform يشتغل) ──────
-        stage('Build Lambda') {
-            steps {
-                sh '''
-                    echo "=== Building Lambda Zip ==="
-                    cd terraform/modules/rds
-                    chmod +x build_lambda.sh
-                    ./build_lambda.sh
-                    echo "✅ Lambda zip built"
-                '''
-            }
-        }
-
-        // ── 8. Terraform Init ──────────────────────────────────
+        // ── 7. Terraform Init ──────────────────────────────────
+        // ملاحظة: Build Lambda مش محتاجه هنا — Terraform destroy
+        // بيمسح الـ resource مش بيبنيه، فالـ zip مش مطلوب
         stage('Terraform Init') {
             steps {
                 withCredentials([
@@ -214,9 +203,15 @@ pipeline {
                         echo "=== Terraform Init ==="
                         cd ${TF_DIR}
                         rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
+
+                        # Cleanup any root-owned build artifacts from previous runs
+                        sudo rm -rf ../../modules/rds/db_init_build 2>/dev/null || true
+
                         mkdir -p $HOME/.terraform.d/plugin-cache
                         export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
-                        terraform init -reconfigure ||                         terraform init -reconfigure -lock=false
+
+                        terraform init -reconfigure || \
+                        terraform init -reconfigure -lock=false
                         echo "✅ Terraform initialized"
                     '''
                 }
@@ -238,7 +233,7 @@ pipeline {
                         if ! terraform destroy \
                             -var-file=terraform.tfvars \
                             -auto-approve; then
-                            echo "⚠️ Terraform destroy had errors — trying with -lock=false"
+                            echo "Terraform destroy had errors — trying with -lock=false"
                             terraform destroy \
                                 -var-file=terraform.tfvars \
                                 -auto-approve \
@@ -260,11 +255,9 @@ pipeline {
                     echo "=== Deleting S3 State Bucket ==="
                     BUCKET="${STATE_BUCKET}"
 
-                    # Check if bucket exists
                     if ! aws s3api head-bucket --bucket "$BUCKET" --region ${AWS_REGION} 2>/dev/null; then
-                        echo "ℹ️ Bucket doesn't exist — skipping"
+                        echo "Bucket does not exist — skipping"
                     else
-                        # Delete all versions
                         for TYPE in Versions DeleteMarkers; do
                             ITEMS=$(aws s3api list-object-versions \
                                 --bucket "$BUCKET" \
@@ -278,12 +271,14 @@ import json,sys
 items=json.load(sys.stdin)
 print(json.dumps({'Objects':items,'Quiet':True}))
 ")
-                                aws s3api delete-objects                                     --bucket "$BUCKET"                                     --delete "$DELETE_PAYLOAD"                                     --region ${AWS_REGION} >/dev/null 2>&1 || true
+                                aws s3api delete-objects \
+                                    --bucket "$BUCKET" \
+                                    --delete "$DELETE_PAYLOAD" \
+                                    --region ${AWS_REGION} >/dev/null 2>&1 || true
                                 echo "  Deleted $TYPE"
                             fi
                         done
 
-                        # Delete bucket
                         aws s3api delete-bucket \
                             --bucket "$BUCKET" \
                             --region ${AWS_REGION} 2>/dev/null || true
@@ -305,7 +300,7 @@ print(json.dumps({'Objects':items,'Quiet':True}))
                         aws dynamodb delete-table \
                             --table-name ${LOCK_TABLE} \
                             --region ${AWS_REGION} 2>/dev/null || \
-                        echo "ℹ️ Lock table doesn't exist or already deleted"
+                        echo "Lock table does not exist or already deleted"
                         echo "✅ Lock table deleted"
                     '''
                 }
@@ -321,7 +316,6 @@ print(json.dumps({'Objects':items,'Quiet':True}))
                 sh '''
                     echo "=== Verifying Destruction ==="
 
-                    # Check ECS cluster
                     CLUSTER_STATUS=$(aws ecs describe-clusters \
                         --clusters novabank-dev-cluster \
                         --region ${AWS_REGION} \
@@ -329,16 +323,22 @@ print(json.dumps({'Objects':items,'Quiet':True}))
                         --output text 2>/dev/null || echo "INACTIVE")
                     echo "ECS Cluster: ${CLUSTER_STATUS}"
 
-                    # Check RDS
                     RDS_COUNT=$(aws rds describe-db-instances \
                         --region ${AWS_REGION} \
                         --query 'length(DBInstances[?contains(DBInstanceIdentifier, `novabank`)])' \
                         --output text 2>/dev/null || echo "0")
                     echo "RDS Instances: ${RDS_COUNT}"
 
+                    NAT_COUNT=$(aws ec2 describe-nat-gateways \
+                        --filter "Name=state,Values=available" \
+                        --region ${AWS_REGION} \
+                        --query 'length(NatGateways[?contains(Tags[?Key==`Project`].Value, `novabank`)])' \
+                        --output text 2>/dev/null || echo "0")
+                    echo "NAT Gateways still active: ${NAT_COUNT}"
+
                     echo ""
                     echo "======================================"
-                    echo "🗑️  DESTRUCTION COMPLETE"
+                    echo "DESTRUCTION COMPLETE"
                     echo "   Account: ${AWS_ACCOUNT_ID}"
                     echo "   Region:  ${AWS_REGION}"
                     echo "   Env:     ${ENV}"
@@ -351,17 +351,22 @@ print(json.dumps({'Objects':items,'Quiet':True}))
 
     post {
         success {
-            echo '🗑️ Infrastructure successfully destroyed!'
+            echo 'Infrastructure successfully destroyed!'
         }
         failure {
             sh '''
-                echo "❌ Destroy pipeline failed!"
+                echo "Destroy pipeline failed!"
                 echo "Check logs — some resources might still exist"
                 echo "Run manually: cd terraform/envs/dev && terraform destroy -var-file=terraform.tfvars -lock=false"
             '''
         }
         always {
-            sh 'rm -f /tmp/destroy-output.txt || true'
+            // Cleanup any leftover build artifacts and temp files
+            sh '''
+                sudo rm -rf terraform/modules/rds/db_init_build 2>/dev/null || true
+                rm -f /tmp/destroy-output.txt || true
+                rm -f terraform/envs/dev/terraform.tfvars || true
+            '''
         }
     }
 }
