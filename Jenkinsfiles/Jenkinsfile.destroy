@@ -190,7 +190,20 @@ pipeline {
             }
         }
 
-        // ── 7. Terraform Init ──────────────────────────────────
+        // ── 7. Build Lambda Zip (مطلوب عشان Terraform يشتغل) ──────
+        stage('Build Lambda') {
+            steps {
+                sh '''
+                    echo "=== Building Lambda Zip ==="
+                    cd terraform/modules/rds
+                    chmod +x build_lambda.sh
+                    ./build_lambda.sh
+                    echo "✅ Lambda zip built"
+                '''
+            }
+        }
+
+        // ── 8. Terraform Init ──────────────────────────────────
         stage('Terraform Init') {
             steps {
                 withCredentials([
@@ -223,12 +236,9 @@ pipeline {
                         rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
 
                         terraform destroy \
+                        if ! terraform destroy \
                             -var-file=terraform.tfvars \
-                            -auto-approve \
-                            2>&1 | tee /tmp/destroy-output.txt
-
-                        DESTROY_STATUS=${PIPESTATUS[0]}
-                        if [ $DESTROY_STATUS -ne 0 ]; then
+                            -auto-approve; then
                             echo "⚠️ Terraform destroy had errors — trying with -lock=false"
                             terraform destroy \
                                 -var-file=terraform.tfvars \
