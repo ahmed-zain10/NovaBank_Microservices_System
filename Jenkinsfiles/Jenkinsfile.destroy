@@ -230,12 +230,11 @@ pipeline {
                     [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds'],
                     file(credentialsId: 'terraform-tfvars-dev', variable: 'TFVARS_FILE')
                 ]) {
-                    sh '''
+                    sh '''#!/bin/bash
                         echo "=== Terraform Destroy ==="
                         cd ${TF_DIR}
                         rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
 
-                        terraform destroy \
                         if ! terraform destroy \
                             -var-file=terraform.tfvars \
                             -auto-approve; then
