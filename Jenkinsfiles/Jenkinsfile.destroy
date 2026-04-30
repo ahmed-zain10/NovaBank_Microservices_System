@@ -117,10 +117,7 @@ pipeline {
                 script {
                     timeout(time: 30, unit: 'MINUTES') {
                         input(
-                            message: '⚠️ هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟
-ده مش ممكن يتراجع!
-
-اضغط الزرار الأحمر للمتابعة أو Abort للإلغاء.',
+                            message: '⚠️ تحذير: هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟ اضغط OK للمتابعة أو Abort للإلغاء.',
                             ok: 'نعم، امسح كل حاجة',
                             submitter: 'admin'
                         )
