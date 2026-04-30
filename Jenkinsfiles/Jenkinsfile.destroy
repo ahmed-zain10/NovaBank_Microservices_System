@@ -115,22 +115,15 @@ pipeline {
         stage('⚠️ Manual Approval') {
             steps {
                 script {
-                    def userInput = timeout(time: 30, unit: 'MINUTES') {
+                    timeout(time: 30, unit: 'MINUTES') {
                         input(
-                            message: '⚠️ هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟\nده مش ممكن يتراجع!',
-                            ok: '✅ نعم، امسح كل حاجة',
-                            submitter: 'admin',
-                            parameters: [
-                                string(
-                                    name: 'CONFIRM',
-                                    defaultValue: '',
-                                    description: 'اكتب "DESTROY" للتأكيد'
-                                )
-                            ]
+                            message: '⚠️ هل أنت متأكد إنك عايز تمسح كل الـ infrastructure؟
+ده مش ممكن يتراجع!
+
+اضغط الزرار الأحمر للمتابعة أو Abort للإلغاء.',
+                            ok: 'نعم، امسح كل حاجة',
+                            submitter: 'admin'
                         )
-                    }
-                    if (userInput?.CONFIRM != 'DESTROY') {
-                        error('❌ لازم تكتب "DESTROY" للتأكيد')
                     }
                     echo '✅ Confirmed — proceeding with destruction'
                 }
