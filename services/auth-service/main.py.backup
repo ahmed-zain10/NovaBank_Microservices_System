@@ -30,8 +30,21 @@ app.add_middleware(CORSMiddleware,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
     allow_headers=["Authorization", "Content-Type"])
 
+from psycopg2 import pool as pg_pool
+from contextlib import contextmanager
+
+_pool = pg_pool.ThreadedConnectionPool(
+    2, 10, DB_URL,
+    cursor_factory=psycopg2.extras.RealDictCursor
+)
+
+@contextmanager
 def conn():
-    return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    c = _pool.getconn()
+    try:
+        yield c
+    finally:
+        _pool.putconn(c)
 
 def init_db():
     with conn() as c:
