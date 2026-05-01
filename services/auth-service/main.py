@@ -35,14 +35,6 @@ from contextlib import contextmanager
 
 _pool = None
 
-@app.on_event("startup")
-def startup():
-    global _pool
-    _pool = pg_pool.ThreadedConnectionPool(
-        2, 10, DB_URL,
-        cursor_factory=psycopg2.extras.RealDictCursor
-    )
-
 @contextmanager
 def conn():
     c = _pool.getconn()
@@ -164,10 +156,19 @@ class ChangePwdReq(BaseModel):
 
 @app.on_event("startup")
 def startup():
+    global _pool
     for i in range(20):
-        try: init_db(); log.info("Auth DB ready"); return
+        try:
+            _pool = pg_pool.ThreadedConnectionPool(
+                2, 10, DB_URL,
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+            init_db()
+            log.info("Auth DB ready")
+            return
         except Exception as e:
-            log.warning(f"DB not ready ({i+1}/20): {e}"); time.sleep(3)
+            log.warning(f"DB not ready ({i+1}/20): {e}")
+            time.sleep(3)
     raise RuntimeError("Auth DB failed")
 
 @app.get("/health")
