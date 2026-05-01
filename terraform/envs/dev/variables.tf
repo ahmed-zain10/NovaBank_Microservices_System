@@ -87,7 +87,7 @@ variable "alb_account_id" {
 variable "teller_allowed_ips" {
   description = "Office/VPN CIDR blocks allowed to reach teller portal"
   type        = list(string)
-  # Example: ["197.121.133.107/32", "198.51.100.0/24", "154.237.223.80/24", "197.43.234.199/32", "0.0.0.0/0", ]
+  # Example: ["197.121.133.107/32", "198.51.100.0/24", "154.237.223.80/24", "197.43.234.199/32", "154.238.210.70/32", ]
 }
 
 # ── ECS Image ─────────────────────────────────────────────────────────────────
