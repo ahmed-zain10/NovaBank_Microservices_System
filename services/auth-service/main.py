@@ -33,10 +33,15 @@ app.add_middleware(CORSMiddleware,
 from psycopg2 import pool as pg_pool
 from contextlib import contextmanager
 
-_pool = pg_pool.ThreadedConnectionPool(
-    2, 10, DB_URL,
-    cursor_factory=psycopg2.extras.RealDictCursor
-)
+_pool = None
+
+@app.on_event("startup")
+def startup():
+    global _pool
+    _pool = pg_pool.ThreadedConnectionPool(
+        2, 10, DB_URL,
+        cursor_factory=psycopg2.extras.RealDictCursor
+    )
 
 @contextmanager
 def conn():
