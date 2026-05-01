@@ -9,6 +9,8 @@
 <img src="https://img.shields.io/badge/IaC-Terraform-7B42BC?style=for-the-badge&logo=terraform&logoColor=white"/>
 <img src="https://img.shields.io/badge/Auth-JWT-000000?style=for-the-badge&logo=jsonwebtokens&logoColor=white"/>
 <img src="https://img.shields.io/badge/Frontend-HTML%2FCSS%2FJS-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black"/>
+<img src="https://img.shields.io/badge/IaC-Terraform-7B42BC?style=for-the-badge&logo=terraform&logoColor=white"/>
+<img src="https://img.shields.io/badge/CI%2FCD-Jenkins-D24939?style=for-the-badge&logo=jenkins&logoColor=white"/>
 
 <br/><br/>
 
@@ -34,6 +36,7 @@ NovaBank نظام بنكي رقمي متكامل يجسّد مفهوم **Microse
 | **Infrastructure (Local)** | Docker · Docker Compose · Nginx |
 | **Infrastructure (Cloud)** | AWS ECS Fargate · RDS · ALB · CloudFront · WAF · Route53 |
 | **IaC** | Terraform 1.7+ — Remote state على S3 + DynamoDB |
+| **CI/CD** | Jenkins · GitHub Webhooks — 3 pipelines (Deploy · CI/CD · Destroy) |
 | **Notifications** | AWS SQS · AWS SNS (SMS) · AWS SES (Email) |
 | **Security** | JWT HS256 · bcrypt · Rate Limiting · RBAC · AWS WAFv2 |
 
@@ -69,16 +72,34 @@ NovaBank نظام بنكي رقمي متكامل يجسّد مفهوم **Microse
 ### Production (AWS)
 
 ```
-User → Route53 → CloudFront + WAF → ALB → ECS Fargate
-                                              ├── api-gateway
-                                              ├── auth-service
-                                              ├── accounts-service
-                                              ├── transactions-service ──► SQS ──► notifications-service ──► SNS/SES
-                                              ├── frontend-customers
-                                              └── frontend-teller
-                                                        │
-                                                   RDS PostgreSQL
-                                              (4 schemas معزولة)
+User
+ │
+ ▼
+Route53
+ │
+ ▼
+CloudFront (2 distributions)
+├── app-dev.novabank-eg.com   →  WAF (OWASP + rate limit)
+└── teller-dev.novabank-eg.com →  WAF (IP allowlist + OWASP)
+ │
+ ▼
+Application Load Balancer (HTTPS only)
+├── /api/*    →  ECS: api-gateway        :8000
+├── /teller/* →  ECS: frontend-teller   :80
+└── /*        →  ECS: frontend-customers :80
+ │
+ ├── ECS Fargate (private subnets — Service Discovery)
+ │   ├── api-gateway           :8000  (JWT · Rate Limit · RBAC)
+ │   ├── auth-service          :8001
+ │   ├── accounts-service      :8002
+ │   ├── transactions-service  :8003 ──► SQS
+ │   └── notifications-service :8004 ◄── SQS ──► SNS (SMS) · SES (Email)
+ │
+ └── RDS PostgreSQL (private subnets)
+     ├── schema: auth          (user: auth_user)
+     ├── schema: accounts      (user: accounts_user)
+     ├── schema: transactions  (user: transactions_user)
+     └── schema: notifications (user: notifications_user)
 ```
 
 ---
@@ -123,7 +144,13 @@ novabank/
 │       ├── frontend-customers/
 │       └── frontend-teller/
 │
+├── Jenkinsfiles/                      # Jenkins CI/CD Pipelines
+│   ├── Jenkinsfile.deploy             # Full deploy من الصفر
+│   ├── Jenkinsfile.cicd               # Webhook — deploy الـ services اللي اتغيرت
+│   └── Jenkinsfile.destroy            # مسح كل الـ infrastructure
+│
 └── terraform/                         # AWS production infrastructure
+    ├── README.md                      # توثيق الـ Terraform modules والـ deployment
     ├── modules/
     │   ├── vpc/
     │   ├── security-groups/
@@ -187,25 +214,30 @@ docker compose up --build
 
 ## نشر المشروع — AWS Production
 
-> انظر [`DEPLOYMENT.md`](./DEPLOYMENT.md) للدليل الكامل خطوة بخطوة.
+> النشر بيتم عن طريق **Jenkins** — انظر [`README.devops.md`](./README.devops.md) للتفصيل الكامل.
 
-الخطوات باختصار:
+الخطوات باختصار عبر Jenkins:
+
+```
+1. شغّل pipeline: Jenkinsfile.deploy
+2. حدد IMAGE_TAG (مثال: v1.0.0)
+3. Jenkins بيعمل كل حاجة تلقائياً (~20 دقيقة)
+```
+
+أو يدوياً:
 
 ```bash
 # 1. Bootstrap remote state
 ./terraform/scripts/bootstrap_state.sh dev us-east-1
 
-# 2. Build Lambda zip
-cd terraform/modules/rds && ./build_lambda.sh
-
-# 3. Deploy infrastructure (~15 دقيقة)
+# 2. Deploy infrastructure (~15 دقيقة)
 cd terraform/envs/dev
 terraform init && terraform apply -var-file=terraform.tfvars
 
-# 4. Push Docker images
+# 3. Push Docker images
 ./terraform/scripts/push_images.sh dev us-east-1 YOUR_ACCOUNT_ID v1.0.0
 
-# 5. Initialize database schemas
+# 4. Initialize database schemas
 aws lambda invoke --function-name novabank-dev-db-init --region us-east-1 /tmp/out.json
 ```
 
@@ -301,20 +333,9 @@ PUT /api/notifications/{user_id}/read-all
 |-------|---------|
 | [`README.backend.md`](./README.backend.md) | المعمارية · الـ services · الـ endpoints · المشاكل والحلول |
 | [`README.frontend.md`](./README.frontend.md) | الـ SPA · تدفق البيانات · الصفحات · الـ UI |
-| [`README.devops.md`](./README.devops.md) | Docker Compose · Nginx · قواعد البيانات محلياً |
-| [`DEPLOYMENT.md`](./DEPLOYMENT.md) | دليل النشر على AWS خطوة بخطوة + المسح الكامل |
-| [`INFRASTRUCTURE.md`](./INFRASTRUCTURE.md) | توثيق كل AWS resource بالتفصيل |
-
----
-
-## التطويرات المستقبلية
-
-- [ ] 2FA Authentication
-- [ ] تحديث أسعار الصرف من API حقيقي
-- [ ] Redis للـ Caching والـ Rate Limiting الموزع
-- [ ] Kafka للـ Event-Driven communication
-- [ ] OpenAPI / Swagger documentation
-- [ ] CI/CD Pipeline (GitHub Actions)
+| [`README.devops.md`](./README.devops.md) | Docker Compose · Nginx · قواعد البيانات · Jenkins Pipelines · AWS Infrastructure |
+| [`INFRASTRUCTURE-on-AWS.md`](./INFRASTRUCTURE-on-AWS.md) | توثيق كل AWS resource بالتفصيل |
+| [`terraform/README.md`](./terraform/README.md) | Terraform modules · directory structure · deployment steps |
 
 ---
 
