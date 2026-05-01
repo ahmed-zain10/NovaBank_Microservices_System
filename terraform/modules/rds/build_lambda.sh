@@ -8,7 +8,7 @@ echo "Building DB Init Lambda package..."
 
 # حذف المجلد القديم
 if [ -d "$BUILD_DIR" ]; then
-    rm -rf "$BUILD_DIR"
+    sudo rm -rf "$BUILD_DIR"
 fi
 mkdir -p "$BUILD_DIR"
 
