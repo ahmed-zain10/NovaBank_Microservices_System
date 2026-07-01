@@ -228,9 +228,25 @@ pipeline {
             }
         }
 
-        // ── 7. Terraform Init ──────────────────────────────────
-        // ملاحظة: Build Lambda مش محتاجه هنا — Terraform destroy
-        // بيمسح الـ resource مش بيبنيه، فالـ zip مش مطلوب
+        // ── 7. Build Lambda Zip (needed for filebase64sha256) ────
+        stage('Build Lambda Zip') {
+            steps {
+                sh '''
+                    echo "=== Creating Lambda zip for Terraform destroy ==="
+                    ZIP_PATH="terraform/modules/rds/db_init_lambda.zip"
+                    if [ ! -f "$ZIP_PATH" ]; then
+                        echo "placeholder" > /tmp/placeholder.py
+                        zip -j "$ZIP_PATH" /tmp/placeholder.py
+                        echo "  Created dummy zip"
+                    else
+                        echo "  Zip already exists"
+                    fi
+                    echo "✅ Lambda zip ready"
+                '''
+            }
+        }
+
+        // ── 8. Terraform Init ──────────────────────────────────
         stage('Terraform Init') {
             steps {
                 withCredentials([
@@ -256,7 +272,7 @@ pipeline {
             }
         }
 
-        // ── 8. Terraform Destroy ───────────────────────────────
+        // ── 9. Terraform Destroy ───────────────────────────────
         stage('Terraform Destroy') {
             steps {
                 withCredentials([
@@ -283,7 +299,7 @@ pipeline {
             }
         }
 
-        // ── 9. Delete S3 State Bucket ──────────────────────────
+        // ── 10. Delete S3 State Bucket ──────────────────────────
         stage('Delete State Bucket') {
             steps {
                 withCredentials([
@@ -327,7 +343,7 @@ print(json.dumps({'Objects':items,'Quiet':True}))
             }
         }
 
-        // ── 10. Delete DynamoDB Lock Table ─────────────────────
+        // ── 11. Delete DynamoDB Lock Table ─────────────────────
         stage('Delete Lock Table') {
             steps {
                 withCredentials([
@@ -345,7 +361,7 @@ print(json.dumps({'Objects':items,'Quiet':True}))
             }
         }
 
-        // ── 11. Verify Destruction ─────────────────────────────
+        // ── 12. Verify Destruction ─────────────────────────────
         stage('Verify Destruction') {
             steps {
                 withCredentials([
