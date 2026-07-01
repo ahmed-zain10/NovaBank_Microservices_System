@@ -230,22 +230,35 @@ pipeline {
                 ]) {
                     sh '''
                         echo "=== Fixing dbname in secrets ==="
-                        for SCHEMA in auth accounts transactions notifications; do
-                            SECRET_ID="novabank/${ENV}/rds/${SCHEMA}"
-                            CURRENT=$(aws secretsmanager get-secret-value \
-                                --secret-id "$SECRET_ID" \
-                                --region ${AWS_REGION} \
-                                --query 'SecretString' --output text)
-                            USER=$(echo "$CURRENT" | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
-                            PASS=$(echo "$CURRENT" | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
-                            aws secretsmanager update-secret \
-                                --secret-id "$SECRET_ID" \
-                                --region ${AWS_REGION} \
-                                --secret-string "{\"dbname\":\"novabank\",\"schema\":\"${SCHEMA}\",\"username\":\"${USER}\",\"password\":\"${PASS}\"}" \
-                                --query 'Name' --output text
-                            echo "  ✅ Fixed: $SECRET_ID"
-                        done
-                        echo "✅ All secrets fixed"
+                        python3 << PYEOF
+import boto3, json
+
+client = boto3.client("secretsmanager", region_name="us-east-1")
+env    = "dev"
+
+schemas = ["auth", "accounts", "transactions", "notifications"]
+
+for schema in schemas:
+    secret_id = f"novabank/{env}/rds/{schema}"
+    try:
+        resp    = client.get_secret_value(SecretId=secret_id)
+        current = json.loads(resp["SecretString"])
+
+        # Fix dbname to always be novabank (the actual DB name)
+        current["dbname"] = "novabank"
+        current["schema"] = schema
+
+        client.update_secret(
+            SecretId=secret_id,
+            SecretString=json.dumps(current)
+        )
+        print(f"  Fixed: {secret_id}")
+    except Exception as e:
+        print(f"  ERROR on {secret_id}: {e}")
+        raise
+
+print("All secrets fixed")
+PYEOF
                     '''
                 }
             }
