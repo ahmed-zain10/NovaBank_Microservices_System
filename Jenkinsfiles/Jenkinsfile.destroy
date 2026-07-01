@@ -136,19 +136,57 @@ pipeline {
                 sh '''
                     echo "=== Stopping ECS Services ==="
                     SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
+                    CLUSTER="novabank-dev-cluster"
 
+                    # Step 1: Set desired count to 0
                     for svc in $SERVICES; do
                         aws ecs update-service \
-                            --cluster novabank-dev-cluster \
+                            --cluster ${CLUSTER} \
                             --service novabank-dev-${svc} \
                             --desired-count 0 \
                             --region ${AWS_REGION} > /dev/null 2>&1 || true
-                        echo "  ${svc} stopped"
+                        echo "  down: novabank-dev-${svc}"
                     done
 
-                    echo "Waiting 30s for tasks to stop..."
-                    sleep 30
-                    echo "✅ ECS services stopped"
+                    # Step 2: Force-stop any still-running tasks
+                    echo "=== Force-stopping running tasks ==="
+                    TASK_ARNS=$(aws ecs list-tasks \
+                        --cluster ${CLUSTER} \
+                        --region ${AWS_REGION} \
+                        --query "taskArns[*]" \
+                        --output text 2>/dev/null || true)
+
+                    if [ -n "$TASK_ARNS" ]; then
+                        for task in $TASK_ARNS; do
+                            aws ecs stop-task \
+                                --cluster ${CLUSTER} \
+                                --task "$task" \
+                                --region ${AWS_REGION} > /dev/null 2>&1 || true
+                            echo "  stopped: $task"
+                        done
+                    else
+                        echo "  No running tasks found"
+                    fi
+
+                    # Step 3: Wait until all tasks are drained (max 2 min)
+                    echo "=== Waiting for all tasks to drain ==="
+                    WAITED=0
+                    while [ $WAITED -lt 120 ]; do
+                        COUNT=$(aws ecs list-tasks \
+                            --cluster ${CLUSTER} \
+                            --region ${AWS_REGION} \
+                            --query "length(taskArns)" \
+                            --output text 2>/dev/null || echo "0")
+                        if [ "$COUNT" = "0" ] || [ "$COUNT" = "None" ]; then
+                            echo "  All tasks stopped"
+                            break
+                        fi
+                        echo "  ${COUNT} tasks still running... (${WAITED}s)"
+                        sleep 10
+                        WAITED=$((WAITED + 10))
+                    done
+
+                    echo "ECS services fully stopped"
                 '''
                 }
             }
