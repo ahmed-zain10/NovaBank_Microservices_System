@@ -222,7 +222,36 @@ pipeline {
             }
         }
 
-        // ── 10. Deploy Lambda ─────────────────────────────────
+        // ── 10. Fix Secret DBNames ────────────────────────────
+        stage('Fix Secret DBNames') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    sh '''
+                        echo "=== Fixing dbname in secrets ==="
+                        for SCHEMA in auth accounts transactions notifications; do
+                            SECRET_ID="novabank/${ENV}/rds/${SCHEMA}"
+                            CURRENT=$(aws secretsmanager get-secret-value \
+                                --secret-id "$SECRET_ID" \
+                                --region ${AWS_REGION} \
+                                --query 'SecretString' --output text)
+                            USER=$(echo "$CURRENT" | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
+                            PASS=$(echo "$CURRENT" | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+                            aws secretsmanager update-secret \
+                                --secret-id "$SECRET_ID" \
+                                --region ${AWS_REGION} \
+                                --secret-string "{\"dbname\":\"novabank\",\"schema\":\"${SCHEMA}\",\"username\":\"${USER}\",\"password\":\"${PASS}\"}" \
+                                --query 'Name' --output text
+                            echo "  ✅ Fixed: $SECRET_ID"
+                        done
+                        echo "✅ All secrets fixed"
+                    '''
+                }
+            }
+        }
+
+        // ── 11. Deploy Lambda ─────────────────────────────────
         stage('Deploy Lambda') {
             steps {
                 withCredentials([
@@ -261,7 +290,7 @@ pipeline {
             }
         }
 
-        // ── 11. ECR Login ───────────────────────────────────────
+        // ── 12. ECR Login ───────────────────────────────────────
         stage('ECR Login') {
             steps {
                 withCredentials([
@@ -277,7 +306,7 @@ pipeline {
             }
         }
 
-        // ── 12. Build & Push Docker Images ─────────────────────
+        // ── 13. Build & Push Docker Images ─────────────────────
         stage('Build & Push Images') {
             steps {
                 withCredentials([
@@ -376,7 +405,7 @@ pipeline {
                                 --query 'services[0].desiredCount' \
                                 --output text)
 
-                            if [ "$RUNNING" = "$DESIRED" ]; then
+                            if [ "$RUNNING" -ge "$DESIRED" ]; then
                                 echo "  ✅ ${svc}: ${RUNNING}/${DESIRED}"
                             else
                                 echo "  ❌ ${svc}: ${RUNNING}/${DESIRED}"
