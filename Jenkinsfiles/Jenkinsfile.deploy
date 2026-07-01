@@ -230,35 +230,47 @@ pipeline {
                 ]) {
                     sh '''
                         echo "=== Fixing dbname in secrets ==="
-                        python3 << PYEOF
-import boto3, json
+                        python3 -c "
+import json, subprocess
 
-client = boto3.client("secretsmanager", region_name="us-east-1")
-env    = "dev"
-
-schemas = ["auth", "accounts", "transactions", "notifications"]
+schemas = ['auth', 'accounts', 'transactions', 'notifications']
+region  = 'us-east-1'
+env     = 'dev'
 
 for schema in schemas:
-    secret_id = f"novabank/{env}/rds/{schema}"
-    try:
-        resp    = client.get_secret_value(SecretId=secret_id)
-        current = json.loads(resp["SecretString"])
+    secret_id = f'novabank/{env}/rds/{schema}'
 
-        # Fix dbname to always be novabank (the actual DB name)
-        current["dbname"] = "novabank"
-        current["schema"] = schema
+    # Get current secret via AWS CLI
+    r = subprocess.run(
+        ['aws', 'secretsmanager', 'get-secret-value',
+         '--secret-id', secret_id,
+         '--region', region,
+         '--query', 'SecretString',
+         '--output', 'text'],
+        capture_output=True, text=True, check=True
+    )
+    current = json.loads(r.stdout.strip())
 
-        client.update_secret(
-            SecretId=secret_id,
-            SecretString=json.dumps(current)
-        )
-        print(f"  Fixed: {secret_id}")
-    except Exception as e:
-        print(f"  ERROR on {secret_id}: {e}")
-        raise
+    # Fix dbname and schema (safe regardless of password special chars)
+    current['dbname'] = 'novabank'
+    current['schema'] = schema
+    new_val = json.dumps(current)
 
-print("All secrets fixed")
-PYEOF
+    # Update secret via AWS CLI
+    subprocess.run(
+        ['aws', 'secretsmanager', 'update-secret',
+         '--secret-id', secret_id,
+         '--region', region,
+         '--secret-string', new_val,
+         '--query', 'Name',
+         '--output', 'text'],
+        capture_output=True, text=True, check=True
+    )
+    print(f'  Fixed: {secret_id}')
+
+print('All secrets fixed')
+"
+                        echo "✅ Secrets fixed"
                     '''
                 }
             }
