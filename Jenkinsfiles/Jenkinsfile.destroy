@@ -303,14 +303,131 @@ pipeline {
                         cd ${TF_DIR}
                         rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
 
-                        if ! terraform destroy \
-                            -var-file=terraform.tfvars \
-                            -auto-approve; then
-                            echo "Terraform destroy had errors — trying with -lock=false"
-                            terraform destroy \
+                        # ── Check if state has any resources to destroy ───
+                        RESOURCE_COUNT=$(terraform show -json 2>/dev/null | \
+                            python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    vals = data.get('values', {})
+    resources = vals.get('root_module', {}).get('resources', [])
+    child = vals.get('root_module', {}).get('child_modules', [])
+    total = len(resources)
+    for m in child:
+        total += len(m.get('resources', []))
+    print(total)
+except:
+    print(0)
+" 2>/dev/null || echo "0")
+
+                        echo "  Resources in state: ${RESOURCE_COUNT}"
+
+                        if [ "${RESOURCE_COUNT}" = "0" ]; then
+                            echo "⚠️  State is empty — nothing to destroy via Terraform"
+                            echo "   Running manual AWS cleanup instead..."
+
+                            # Manual cleanup for resources not in state
+                            CLUSTER="novabank-${ENV}-cluster"
+                            SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
+
+                            for svc in $SERVICES; do
+                                aws ecs update-service --cluster $CLUSTER                                     --service novabank-${ENV}-${svc}                                     --desired-count 0 --region ${AWS_REGION} > /dev/null 2>&1 || true
+                                aws ecs delete-service --cluster $CLUSTER                                     --service novabank-${ENV}-${svc}                                     --force --region ${AWS_REGION} > /dev/null 2>&1 &&                                     echo "  Deleted service: ${svc}" || true
+                            done
+                            aws ecs delete-cluster --cluster $CLUSTER                                 --region ${AWS_REGION} > /dev/null 2>&1 && echo "  Deleted cluster" || true
+
+                            aws rds delete-db-instance                                 --db-instance-identifier novabank-${ENV}-rds                                 --skip-final-snapshot                                 --region ${AWS_REGION} > /dev/null 2>&1 && echo "  Deleting RDS..." || true
+
+                            ALB_ARN=$(aws elbv2 describe-load-balancers --region ${AWS_REGION}                                 --query "LoadBalancers[?contains(LoadBalancerName,\`novabank\`)].LoadBalancerArn"                                 --output text 2>/dev/null)
+                            [ -n "$ALB_ARN" ] && aws elbv2 delete-load-balancer                                 --load-balancer-arn $ALB_ARN --region ${AWS_REGION} > /dev/null 2>&1 &&                                 echo "  Deleted ALB" || true
+
+                            aws lambda delete-function --function-name novabank-${ENV}-db-init                                 --region ${AWS_REGION} > /dev/null 2>&1 && echo "  Deleted Lambda" || true
+
+                            for repo in api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller; do
+                                aws ecr delete-repository --repository-name novabank/${repo}                                     --force --region ${AWS_REGION} > /dev/null 2>&1 &&                                     echo "  Deleted ECR: ${repo}" || true
+                            done
+
+                            for secret in auth accounts transactions notifications master; do
+                                aws secretsmanager delete-secret                                     --secret-id novabank/${ENV}/rds/${secret}                                     --force-delete-without-recovery                                     --region ${AWS_REGION} > /dev/null 2>&1 &&                                     echo "  Deleted secret: ${secret}" || true
+                            done
+                            aws secretsmanager delete-secret                                 --secret-id novabank/${ENV}/jwt-secret                                 --force-delete-without-recovery                                 --region ${AWS_REGION} > /dev/null 2>&1 && echo "  Deleted: jwt-secret" || true
+
+                            QUEUE_URL=$(aws sqs get-queue-url                                 --queue-name novabank-${ENV}-notifications                                 --region ${AWS_REGION}                                 --query 'QueueUrl' --output text 2>/dev/null || true)
+                            [ -n "$QUEUE_URL" ] && aws sqs delete-queue                                 --queue-url $QUEUE_URL --region ${AWS_REGION} > /dev/null 2>&1 &&                                 echo "  Deleted SQS" || true
+
+                            # Target Groups
+                            for tg in api customers teller; do
+                                TG_ARN=$(aws elbv2 describe-target-groups \
+                                    --names novabank-${ENV}-tg-${tg} \
+                                    --region ${AWS_REGION} \
+                                    --query 'TargetGroups[0].TargetGroupArn' \
+                                    --output text 2>/dev/null || true)
+                                [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ] && \
+                                    aws elbv2 delete-target-group \
+                                        --target-group-arn $TG_ARN \
+                                        --region ${AWS_REGION} > /dev/null 2>&1 && \
+                                    echo "  Deleted TG: novabank-${ENV}-tg-${tg}" || true
+                            done
+
+                            # RDS Subnet Group
+                            aws rds delete-db-subnet-group \
+                                --db-subnet-group-name novabank-${ENV}-db-subnet-group \
+                                --region ${AWS_REGION} > /dev/null 2>&1 && \
+                                echo "  Deleted RDS subnet group" || true
+
+                            # CloudWatch Log Groups
+                            for lg in \
+                                "/aws/ecs/containerinsights/novabank-${ENV}-cluster/performance" \
+                                "/aws/rds/instance/novabank-${ENV}-rds/postgresql" \
+                                "/novabank/${ENV}/vpc-flow-logs" \
+                                "aws-waf-logs-novabank-${ENV}-customers" \
+                                "aws-waf-logs-novabank-${ENV}-teller"; do
+                                aws logs delete-log-group \
+                                    --log-group-name "$lg" \
+                                    --region ${AWS_REGION} > /dev/null 2>&1 && \
+                                    echo "  Deleted log group: $lg" || true
+                            done
+
+                            # S3 Log Buckets
+                            ACCOUNT_ID=$(aws sts get-caller-identity \
+                                --query Account --output text)
+                            for bucket in \
+                                "novabank-${ENV}-alb-logs-${ACCOUNT_ID}" \
+                                "novabank-${ENV}-cf-logs-${ACCOUNT_ID}"; do
+                                aws s3 rm s3://${bucket} --recursive \
+                                    --region ${AWS_REGION} > /dev/null 2>&1 || true
+                                aws s3api delete-bucket \
+                                    --bucket ${bucket} \
+                                    --region ${AWS_REGION} > /dev/null 2>&1 && \
+                                    echo "  Deleted S3: ${bucket}" || true
+                            done
+
+                            # Elastic IPs (unassociated)
+                            EIPS=$(aws ec2 describe-addresses \
+                                --region ${AWS_REGION} \
+                                --filters Name=domain,Values=vpc \
+                                --query 'Addresses[?AssociationId==null].AllocationId' \
+                                --output text 2>/dev/null || true)
+                            for eip in $EIPS; do
+                                aws ec2 release-address \
+                                    --allocation-id $eip \
+                                    --region ${AWS_REGION} > /dev/null 2>&1 && \
+                                    echo "  Released EIP: $eip" || true
+                            done
+
+                        else
+                            echo "  Running terraform destroy on ${RESOURCE_COUNT} resources..."
+                            if ! terraform destroy \
                                 -var-file=terraform.tfvars \
-                                -auto-approve \
-                                -lock=false
+                                -var="image_tag=latest" \
+                                -auto-approve; then
+                                echo "Terraform destroy had errors — trying with -lock=false"
+                                terraform destroy \
+                                    -var-file=terraform.tfvars \
+                                    -var="image_tag=latest" \
+                                    -auto-approve \
+                                    -lock=false
+                            fi
                         fi
                         echo "✅ Infrastructure destroyed"
                     '''
