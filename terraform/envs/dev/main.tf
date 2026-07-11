@@ -75,8 +75,11 @@ module "secrets" {
 module "ecr" {
   source = "../../modules/ecr"
 
-  environment = local.environment
-  tags        = local.common_tags
+  project     = "novabank"
+  env         = local.environment
+  kms_key_arn = module.secrets.kms_key_arn
+
+  tags = local.common_tags
 }
 
 module "rds" {
