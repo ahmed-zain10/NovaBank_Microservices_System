@@ -29,12 +29,12 @@ terraform {
   }
 
   backend "s3" {
-    # Filled in via -backend-config, or hardcode after bootstrap_state.sh:
-    # bucket         = "novabank-terraform-state-dev"
-    # key            = "dev/terraform.tfstate"
-    # region         = "eu-west-1"
-    # dynamodb_table = "novabank-terraform-locks-dev"
-    # encrypt        = true
+     Filled in via -backend-config, or hardcode after bootstrap_state.sh:
+     bucket         = "novabank-terraform-state-dev"
+     key            = "dev/terraform.tfstate"
+     region         = "eu-west-1"
+     dynamodb_table = "novabank-terraform-locks-dev"
+     encrypt        = true
   }
 }
 
