@@ -49,6 +49,12 @@ variable "rds_instance_class" {
   default     = "db.t3.micro"
 }
 
+variable "rds_master_username" {
+  description = "Master username for the RDS PostgreSQL instance"
+  type        = string
+  default     = "novabank_admin"
+}
+
 variable "rds_multi_az" {
   description = "Whether RDS runs Multi-AZ"
   type        = bool

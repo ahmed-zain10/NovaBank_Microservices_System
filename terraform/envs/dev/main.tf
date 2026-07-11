@@ -61,6 +61,25 @@ module "security_groups" {
   tags = local.common_tags
 }
 
+# CloudWatch Logs VPC interface endpoint — lives at root, not inside
+# modules/vpc, because it needs the SG created by modules/security_groups
+# and putting it inside modules/vpc would create a circular module
+# dependency (vpc needs the SG, security_groups needs the VPC id).
+resource "aws_vpc_endpoint" "logs" {
+  vpc_id             = module.vpc.vpc_id
+  service_name       = "com.amazonaws.${var.aws_region}.logs"
+  vpc_endpoint_type  = "Interface"
+  subnet_ids         = module.vpc.private_subnet_ids
+  security_group_ids = [module.security_groups.vpc_endpoints_security_group_id]
+
+  private_dns_enabled = true
+
+  tags = merge(
+    local.common_tags,
+    { Name = "${local.environment}-logs-vpce" }
+  )
+}
+
 ############################################
 # 2) Data layer
 ############################################
@@ -68,8 +87,11 @@ module "security_groups" {
 module "secrets" {
   source = "../../modules/secrets"
 
-  environment = local.environment
-  tags        = local.common_tags
+  project              = "novabank"
+  env                  = local.environment
+  rds_master_username  = var.rds_master_username
+
+  tags = local.common_tags
 }
 
 module "ecr" {
@@ -93,9 +115,9 @@ module "rds" {
   lambda_sg_id       = module.security_groups.lambda_security_group_id
   kms_key_arn        = module.secrets.kms_key_arn
 
-  rds_master_username    = module.secrets.db_master_username
-  rds_master_password    = module.secrets.db_master_password
-  rds_master_secret_arn  = module.secrets.db_credentials_secret_arn
+  rds_master_username    = var.rds_master_username
+  rds_master_password    = module.secrets.rds_master_password
+  rds_master_secret_arn  = module.secrets.rds_master_secret_arn
   schema_secret_arns     = module.secrets.schema_secret_arns
 
   db_instance_class = var.rds_instance_class
@@ -173,7 +195,7 @@ module "iam_eks_irsa" {
         Statement = [{
           Effect   = "Allow"
           Action   = ["secretsmanager:GetSecretValue"]
-          Resource = module.secrets.service_secret_arns[svc]
+          Resource = module.secrets.schema_secret_arns[cfg.namespace]
         }]
       })
     }
