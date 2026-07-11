@@ -1,27 +1,25 @@
-variable "project" {
-  type = string
-}
+############################################
+# modules/waf/variables.tf
+############################################
 
-variable "env" {
-  type = string
+variable "environment" {
+  description = "Environment name (e.g. dev, prod)"
+  type        = string
 }
 
 variable "teller_allowed_ips" {
-  description = "List of CIDR blocks allowed to access teller frontend"
+  description = "CIDR list of office IP(s) allowed to access the teller portal"
   type        = list(string)
 }
 
-variable "customer_rate_limit" {
-  type    = number
-  default = 2000
-}
-
-variable "teller_rate_limit" {
-  type    = number
-  default = 500
+variable "rate_limit_requests_per_5min" {
+  description = "Max requests per 5-minute window per IP before blocking, on the customer WAF"
+  type        = number
+  default     = 2000
 }
 
 variable "tags" {
-  type    = map(string)
-  default = {}
+  description = "Common tags applied to WAF resources"
+  type        = map(string)
+  default     = {}
 }

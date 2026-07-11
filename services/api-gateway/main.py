@@ -196,6 +196,31 @@ async def loans(request: Request, account_id: str, _=Depends(require_auth)):
 async def apply_loan(request: Request, account_id: str, _=Depends(require_auth)):
     return await proxy(request, ACCOUNTS_URL, f"/accounts/{account_id}/loans")
 
+
+@app.get("/api/teller/loans")
+async def list_all_loans_gw(request: Request, _=Depends(require_employee)):
+    return await proxy(request, ACCOUNTS_URL, "/accounts/loans")
+
+@app.post("/api/teller/loans/{account_id}")
+async def teller_create_loan_gw(request: Request, account_id: str, p=Depends(require_employee)):
+    if p.get("role") != "teller":
+        raise HTTPException(403,"التيلر فقط يقدر يقدم طلب نيابة عن العميل")
+    return await proxy(request, ACCOUNTS_URL, f"/accounts/{account_id}/loans/teller-request")
+
+@app.put("/api/teller/loans/{loan_id}/cancel")
+async def cancel_loan_gw(request: Request, loan_id: str, p=Depends(require_employee)):
+    if p.get("role") != "teller":
+        raise HTTPException(403,"التيلر فقط يقدر يلغي طلب قرض")
+    return await proxy(request, ACCOUNTS_URL, f"/accounts/loans/{loan_id}/cancel")
+
+@app.put("/api/teller/loans/{loan_id}/approve")
+async def approve_loan_gw(request: Request, loan_id: str, _=Depends(require_admin_or_supervisor)):
+    return await proxy(request, ACCOUNTS_URL, f"/accounts/loans/{loan_id}/approve")
+
+@app.put("/api/teller/loans/{loan_id}/reject")
+async def reject_loan_gw(request: Request, loan_id: str, _=Depends(require_admin_or_supervisor)):
+    return await proxy(request, ACCOUNTS_URL, f"/accounts/loans/{loan_id}/reject")
+
 @app.get("/api/accounts/{account_id}/portfolio")
 async def portfolio(request: Request, account_id: str, _=Depends(require_auth)):
     return await proxy(request, ACCOUNTS_URL, f"/accounts/{account_id}/portfolio")

@@ -184,6 +184,27 @@ def deposit(data: dict):
     except: pass
     return {"ok":True,"newBalance":new_bal,"transaction":tx}
 
+
+# ── Loan Credit (يُستدعى من accounts-service عند الموافقة على قرض) ──
+@app.post("/transactions/loan-credit")
+def loan_credit(data: dict):
+    amt      = float(data["amount"])
+    acc_id   = data["accountId"]
+    ltype    = data.get("loanType","قرض")
+    reviewer = data.get("reviewerName","")
+    result   = call_accounts("POST","/internal/update-balance",{"account_id":acc_id,"delta":amt,"operation":"loan_credit"})
+    new_bal  = result["newBalance"]
+    desc = f"صرف قرض {ltype}" + (f" (اعتماد: {reviewer})" if reviewer else "")
+    with conn() as c:
+        with c.cursor() as cur:
+            tx = record(cur,acc_id,"credit","loan",desc,amt,new_bal,
+                        to_acc=acc_id,performed_by="system",performed_by_id=None)
+        c.commit()
+    return {"ok":True,"transaction":tx,"newBalance":new_bal}
+
+
+
+
 # ── Withdraw ──────────────────────────────────────────────────────────
 @app.post("/transactions/withdraw")
 def withdraw(data: dict):

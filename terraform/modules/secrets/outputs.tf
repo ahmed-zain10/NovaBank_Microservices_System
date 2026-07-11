@@ -1,29 +1,33 @@
-output "rds_master_secret_arn" {
-  description = "ARN of the RDS master credentials secret"
-  value       = aws_secretsmanager_secret.rds_master.arn
+############################################
+# modules/secrets/outputs.tf
+############################################
+
+output "kms_key_arn" {
+  description = "KMS key ARN used for RDS, EBS, EKS secrets encryption, and Secrets Manager (feed into modules/eks, modules/eks-nodegroup)"
+  value       = aws_kms_key.main.arn
 }
 
-output "rds_master_secret_name" {
-  value = aws_secretsmanager_secret.rds_master.name
+output "kms_key_id" {
+  description = "KMS key ID"
+  value       = aws_kms_key.main.key_id
 }
 
-output "schema_secret_arns" {
-  description = "Map of schema name → secret ARN"
-  value       = { for k, v in aws_secretsmanager_secret.schema_creds : k => v.arn }
+output "kms_alias_name" {
+  description = "KMS key alias name"
+  value       = aws_kms_alias.main.name
 }
 
-output "schema_secret_names" {
-  description = "Map of schema name → secret name"
-  value       = { for k, v in aws_secretsmanager_secret.schema_creds : k => v.name }
+output "db_credentials_secret_arn" {
+  description = "Secrets Manager ARN holding the RDS master username/password (feed into modules/rds -> db_credentials_secret_arn)"
+  value       = aws_secretsmanager_secret.db_credentials.arn
 }
 
-output "jwt_secret_arn" {
-  description = "ARN of the JWT secret"
-  value       = aws_secretsmanager_secret.jwt.arn
+output "jwt_signing_key_secret_arn" {
+  description = "Secrets Manager ARN holding the JWT signing key (used by auth-service's IRSA policy)"
+  value       = aws_secretsmanager_secret.jwt_signing_key.arn
 }
 
-output "rds_master_password" {
-  description = "RDS master password (sensitive)"
-  value       = random_password.rds_master.result
-  sensitive   = true
+output "service_secret_arns" {
+  description = "Map of service name -> Secrets Manager ARN (feed into envs/dev/main.tf -> module.iam_eks_irsa inline_policy_json Resource)"
+  value       = { for svc, secret in aws_secretsmanager_secret.service_secrets : svc => secret.arn }
 }

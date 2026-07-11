@@ -1,37 +1,52 @@
 #!/bin/sh
-###############################################################################
-# NovaBank – Service Entrypoint
-# Reads DB credentials from AWS Secrets Manager (injected as env vars)
-# and constructs the DATABASE_URL before starting uvicorn.
+############################################
+# scripts/entrypoint.sh
 #
-# Add to each service Dockerfile:
-#   COPY entrypoint.sh /entrypoint.sh
-#   RUN chmod +x /entrypoint.sh
-#   ENTRYPOINT ["/entrypoint.sh"]
-###############################################################################
+# CHANGED FOR EKS: the old ECS version pulled credentials from the
+# ECS task metadata endpoint (169.254.170.2) using the task role.
+# On EKS, the pod's ServiceAccount is annotated with an IRSA role
+# (eks.amazonaws.com/role-arn), and EKS's Pod Identity webhook
+# automatically injects AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE
+# into the container — the AWS CLI/SDK picks these up with zero
+# extra config. No metadata endpoint calls needed at all.
+#
+# Required env vars (set these in the K8s Deployment manifest):
+#   SECRET_NAME   e.g. novabank/dev/auth-service
+#   AWS_REGION    e.g. eu-west-1
+#
+# Optional:
+#   SECRET_ENV_PREFIX   prefix added to each exported var name (default: none)
+############################################
 
-set -e
+set -eu
 
-# DB_SECRET_JSON is injected by ECS from Secrets Manager
-# Format: {"username": "...", "password": "...", "dbname": "...", "schema": "..."}
-if [ -n "${DB_SECRET_JSON}" ]; then
-  DB_USER=$(echo "${DB_SECRET_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['username'])")
-  DB_PASS=$(echo "${DB_SECRET_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['password'])")
-  DB_SCHEMA=$(echo "${DB_SECRET_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('schema', 'public'))")
-
-  # Build DATABASE_URL with schema in search_path for isolation
-  export DATABASE_URL="postgresql://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}?options=-csearch_path%3D${DB_SCHEMA},public"
-  echo "[entrypoint] DATABASE_URL constructed for schema: ${DB_SCHEMA}"
+if [ -z "${SECRET_NAME:-}" ]; then
+  echo "entrypoint.sh: SECRET_NAME is not set, skipping secret injection" >&2
 else
-  echo "[entrypoint] WARNING: DB_SECRET_JSON not set, using DATABASE_URL as-is"
+  echo "entrypoint.sh: fetching secret '${SECRET_NAME}' via IRSA..." >&2
+
+  SECRET_JSON=$(aws secretsmanager get-secret-value \
+    --secret-id "${SECRET_NAME}" \
+    --region "${AWS_REGION:-eu-west-1}" \
+    --query 'SecretString' \
+    --output text)
+
+  if [ -z "${SECRET_JSON}" ]; then
+    echo "entrypoint.sh: ERROR - empty secret value for '${SECRET_NAME}'" >&2
+    exit 1
+  fi
+
+  # Export each key in the secret JSON as an environment variable.
+  # Requires `jq` in the container image.
+  eval "$(
+    echo "${SECRET_JSON}" | jq -r '
+      to_entries[] |
+      "export " + (env.SECRET_ENV_PREFIX // "") + .key + "=" + (.value | @sh)
+    '
+  )"
+
+  echo "entrypoint.sh: secret injected as environment variables" >&2
 fi
 
-# JWT_SECRET_JSON is injected by ECS from Secrets Manager
-# Format: {"jwt_secret": "..."}
-if [ -n "${JWT_SECRET_JSON}" ]; then
-  export JWT_SECRET=$(echo "${JWT_SECRET_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['jwt_secret'])")
-  echo "[entrypoint] JWT_SECRET loaded from Secrets Manager"
-fi
-
-# Start the application
+# Hand off to the actual container command (e.g. uvicorn main:app ...)
 exec "$@"

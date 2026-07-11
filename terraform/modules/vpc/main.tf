@@ -1,170 +1,313 @@
-###############################################################################
-# NovaBank – VPC Module
-# Creates: VPC, public/private subnets (multi-AZ), IGW, NAT GW, route tables
-###############################################################################
+############################################
+# envs/dev/main.tf
+############################################
 
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
+locals {
+  environment = "dev"
+  cluster_name = var.cluster_name
 
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-vpc"
-  })
-}
-
-# ── Internet Gateway ────────────────────────────────────────────────────────
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-igw"
-  })
-}
-
-# ── Public Subnets (for ALB, NAT GW) ────────────────────────────────────────
-resource "aws_subnet" "public" {
-  count                   = length(var.azs)
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidrs[count.index]
-  availability_zone       = var.azs[count.index]
-  map_public_ip_on_launch = true
-
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-public-${var.azs[count.index]}"
-    Tier = "public"
-  })
-}
-
-# ── Private Subnets (for ECS tasks, RDS) ────────────────────────────────────
-resource "aws_subnet" "private" {
-  count             = length(var.azs)
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidrs[count.index]
-  availability_zone = var.azs[count.index]
-
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-private-${var.azs[count.index]}"
-    Tier = "private"
-  })
-}
-
-# ── Elastic IPs for NAT GWs ──────────────────────────────────────────────────
-resource "aws_eip" "nat" {
-  count  = length(var.azs)
-  domain = "vpc"
-
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-eip-nat-${count.index}"
-  })
-
-  depends_on = [aws_internet_gateway.main]
-}
-
-# ── NAT Gateways (one per AZ for HA) ─────────────────────────────────────────
-resource "aws_nat_gateway" "main" {
-  count         = length(var.azs)
-  allocation_id = aws_eip.nat[count.index].id
-  subnet_id     = aws_subnet.public[count.index].id
-
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-nat-${var.azs[count.index]}"
-  })
-
-  depends_on = [aws_internet_gateway.main]
-}
-
-# ── Public Route Table ────────────────────────────────────────────────────────
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
+  common_tags = {
+    Project     = "novabank"
+    Environment = local.environment
+    ManagedBy   = "terraform"
   }
 
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-rt-public"
-  })
+  # Per-microservice metadata used to wire IRSA roles <-> namespaces <-> service accounts
+  # consistently across modules.iam_eks_irsa and modules.kubernetes.
+  microservices = {
+    "auth-service" = {
+      namespace       = "auth"
+      service_account = "auth-service-sa"
+    }
+    "accounts-service" = {
+      namespace       = "accounts"
+      service_account = "accounts-service-sa"
+    }
+    "transactions-service" = {
+      namespace       = "transactions"
+      service_account = "transactions-service-sa"
+    }
+    "notifications-service" = {
+      namespace       = "notifications"
+      service_account = "notifications-service-sa"
+    }
+  }
 }
 
-resource "aws_route_table_association" "public" {
-  count          = length(var.azs)
-  subnet_id      = aws_subnet.public[count.index].id
-  route_table_id = aws_route_table.public.id
+############################################
+# 1) Networking
+############################################
+
+module "vpc" {
+  source = "../../modules/vpc"
+
+  environment  = local.environment
+  cluster_name = local.cluster_name
+  vpc_cidr     = var.vpc_cidr
+  az_count     = var.az_count
+
+  tags = local.common_tags
 }
 
-# ── Private Route Tables (one per AZ → its own NAT GW) ───────────────────────
-resource "aws_route_table" "private" {
-  count  = length(var.azs)
-  vpc_id = aws_vpc.main.id
+module "security_groups" {
+  source = "../../modules/security-groups"
 
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[count.index].id
+  environment  = local.environment
+  cluster_name = local.cluster_name
+  vpc_id       = module.vpc.vpc_id
+  vpc_cidr     = var.vpc_cidr
+
+  tags = local.common_tags
+}
+
+############################################
+# 2) Data layer
+############################################
+
+module "secrets" {
+  source = "../../modules/secrets"
+
+  environment = local.environment
+  tags        = local.common_tags
+}
+
+module "ecr" {
+  source = "../../modules/ecr"
+
+  environment = local.environment
+  tags        = local.common_tags
+}
+
+module "rds" {
+  source = "../../modules/rds"
+
+  environment           = local.environment
+  vpc_id                = module.vpc.vpc_id
+  subnet_ids            = module.vpc.private_subnet_ids
+  security_group_id     = module.security_groups.rds_security_group_id
+  instance_class        = var.rds_instance_class
+  multi_az              = var.rds_multi_az
+  backup_retention_days = var.rds_backup_retention_days
+  deletion_protection   = var.rds_deletion_protection
+  db_credentials_secret_arn = module.secrets.db_credentials_secret_arn
+
+  tags = local.common_tags
+}
+
+############################################
+# 3) IAM — base roles (no OIDC dependency yet)
+############################################
+
+module "iam_eks_base" {
+  source = "../../modules/iam-eks"
+
+  cluster_name        = local.cluster_name
+  enable_ssm_on_nodes  = true
+  irsa_roles          = {} # populated later by module.iam_eks_irsa, after OIDC exists
+
+  tags = local.common_tags
+}
+
+############################################
+# 4) EKS control plane
+############################################
+
+module "eks" {
+  source = "../../modules/eks"
+
+  cluster_name            = local.cluster_name
+  kubernetes_version      = var.kubernetes_version
+  cluster_role_arn        = module.iam_eks_base.cluster_role_arn
+  vpc_id                  = module.vpc.vpc_id
+  subnet_ids              = module.vpc.private_subnet_ids
+  node_security_group_id  = module.security_groups.eks_node_security_group_id
+  endpoint_private_access = true
+  endpoint_public_access  = var.eks_endpoint_public_access
+  public_access_cidrs     = var.eks_public_access_cidrs
+  log_retention_days      = var.log_retention_days
+  kms_key_arn             = module.secrets.kms_key_arn
+
+  tags = local.common_tags
+}
+
+############################################
+# 5) OIDC provider (bridges eks -> iam-eks IRSA)
+############################################
+
+module "oidc" {
+  source = "../../modules/oidc"
+
+  cluster_name            = local.cluster_name
+  cluster_oidc_issuer_url = module.eks.cluster_oidc_issuer_url
+
+  tags = local.common_tags
+}
+
+############################################
+# 6) IAM — IRSA roles, now that OIDC exists
+############################################
+
+module "iam_eks_irsa" {
+  source = "../../modules/iam-eks"
+
+  cluster_name      = "${local.cluster_name}-irsa"
+  oidc_provider_arn = module.oidc.oidc_provider_arn
+  oidc_provider_url = module.oidc.oidc_provider_url
+
+  irsa_roles = {
+    for svc, cfg in local.microservices : svc => {
+      namespace          = cfg.namespace
+      service_account    = cfg.service_account
+      policy_arns        = []
+      inline_policy_json = jsonencode({
+        Version = "2012-10-17"
+        Statement = [{
+          Effect   = "Allow"
+          Action   = ["secretsmanager:GetSecretValue"]
+          Resource = module.secrets.service_secret_arns[svc]
+        }]
+      })
+    }
   }
 
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-rt-private-${var.azs[count.index]}"
-  })
+  tags = local.common_tags
 }
 
-resource "aws_route_table_association" "private" {
-  count          = length(var.azs)
-  subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private[count.index].id
+############################################
+# 7) Worker nodes
+############################################
+
+module "eks_nodegroup" {
+  source = "../../modules/eks-nodegroup"
+
+  cluster_name                        = module.eks.cluster_name
+  cluster_endpoint                    = module.eks.cluster_endpoint
+  cluster_certificate_authority_data  = module.eks.cluster_certificate_authority_data
+  kubernetes_version                  = var.kubernetes_version
+  nodegroup_name                      = "general"
+
+  node_role_arn           = module.iam_eks_base.node_role_arn
+  node_security_group_id  = module.security_groups.eks_node_security_group_id
+  subnet_ids              = module.vpc.private_subnet_ids
+  kms_key_arn             = module.secrets.kms_key_arn
+
+  capacity_type  = var.node_capacity_type
+  instance_types = var.node_instance_types
+  disk_size      = var.node_disk_size
+
+  min_size     = var.node_min_size
+  max_size     = var.node_max_size
+  desired_size = var.node_desired_size
+
+  tags = local.common_tags
 }
 
-# ── VPC Flow Logs ─────────────────────────────────────────────────────────────
-resource "aws_cloudwatch_log_group" "vpc_flow" {
-  name              = "/novabank/${var.env}/vpc-flow-logs"
-  retention_in_days = 30
+############################################
+# 8) EKS Add-ons
+############################################
 
-  tags = var.tags
+module "addons" {
+  source = "../../modules/addons"
+
+  cluster_name           = module.eks.cluster_name
+  oidc_provider_arn      = module.oidc.oidc_provider_arn
+  oidc_provider_url      = module.oidc.oidc_provider_url
+  node_group_dependency  = module.eks_nodegroup.node_group_id
+
+  enable_ebs_csi_driver = true
+
+  tags = local.common_tags
 }
 
-resource "aws_flow_log" "main" {
-  iam_role_arn    = aws_iam_role.flow_log.arn
-  log_destination = aws_cloudwatch_log_group.vpc_flow.arn
-  traffic_type    = "ALL"
-  vpc_id          = aws_vpc.main.id
+############################################
+# 9) Helm releases (ALB Controller, autoscaler, external-dns)
+############################################
 
-  tags = merge(var.tags, {
-    Name = "${var.project}-${var.env}-flow-log"
-  })
+module "helm" {
+  source = "../../modules/helm"
+
+  cluster_name      = module.eks.cluster_name
+  aws_region        = var.aws_region
+  vpc_id            = module.vpc.vpc_id
+  oidc_provider_arn = module.oidc.oidc_provider_arn
+  oidc_provider_url = module.oidc.oidc_provider_url
+
+  enable_cluster_autoscaler = true
+  enable_external_dns       = var.enable_external_dns
+  hosted_zone_name          = var.hosted_zone_name
+
+  tags = local.common_tags
+
+  depends_on = [module.addons]
 }
 
-resource "aws_iam_role" "flow_log" {
-  name = "${var.project}-${var.env}-vpc-flow-log-role"
+############################################
+# 10) Kubernetes-level objects (namespaces, service accounts, quotas)
+############################################
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "vpc-flow-logs.amazonaws.com" }
-    }]
-  })
+module "kubernetes" {
+  source = "../../modules/kubernetes"
 
-  tags = var.tags
+  environment = local.environment
+
+  namespaces = {
+    "api-gateway"        = {}
+    "auth"               = {}
+    "accounts"           = {}
+    "transactions"       = {}
+    "notifications"      = {}
+    "frontend-customers" = {}
+    "frontend-teller"    = {}
+  }
+
+  service_accounts = {
+    for svc, cfg in local.microservices : svc => {
+      name          = cfg.service_account
+      namespace     = cfg.namespace
+      irsa_role_arn = module.iam_eks_irsa.irsa_role_arns[svc]
+    }
+  }
+
+  enable_default_deny_network_policy = true
+
+  depends_on = [module.eks_nodegroup]
 }
 
-resource "aws_iam_role_policy" "flow_log" {
-  name = "${var.project}-${var.env}-vpc-flow-log-policy"
-  role = aws_iam_role.flow_log.id
+############################################
+# 11) Edge — WAF + CloudFront (in front of the ALB
+#     that module.helm's ALB Controller provisions
+#     dynamically once Ingress objects are applied)
+############################################
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams"
-      ]
-      Resource = "*"
-    }]
-  })
+module "waf" {
+  source = "../../modules/waf"
+
+  providers = {
+    aws = aws.us_east_1
+  }
+
+  environment         = local.environment
+  teller_allowed_ips  = var.teller_allowed_ips
+
+  tags = local.common_tags
+}
+
+module "cloudfront" {
+  source = "../../modules/cloudfront"
+
+  environment                    = local.environment
+  customer_domain                = var.customer_domain
+  teller_domain                  = var.teller_domain
+  hosted_zone_name               = var.hosted_zone_name
+  acm_certificate_arn_us_east_1  = var.acm_certificate_arn_us_east_1
+  waf_customer_acl_arn           = module.waf.customer_web_acl_arn
+  waf_teller_acl_arn             = module.waf.teller_web_acl_arn
+
+  # NOTE: the ALB origin domain isn't known until the AWS Load Balancer
+  # Controller creates it from an Ingress (post-apply, out of band).
+  # Set this manually after Step 9 in the README, or wire it via a
+  # `data "kubernetes_ingress_v1"` lookup once the Ingress exists.
+  alb_origin_domain = var.alb_origin_domain
+
+  tags = local.common_tags
 }

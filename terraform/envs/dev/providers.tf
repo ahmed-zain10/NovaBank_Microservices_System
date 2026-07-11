@@ -1,8 +1,6 @@
-###############################################################################
-# NovaBank – Dev Environment – Terraform Backend (S3 + DynamoDB)
-# Run ONCE manually before using this env:
-#   cd envs/dev && terraform init
-###############################################################################
+############################################
+# envs/dev/providers.tf
+############################################
 
 terraform {
   required_version = ">= 1.7.0"
@@ -16,42 +14,55 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.31"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.14"
+    }
   }
 
-  # Remote state: S3 bucket + DynamoDB lock table
-  # The bucket and table are created by scripts/bootstrap_state.sh
   backend "s3" {
-    bucket         = "novabank-terraform-state-dev"
-    key            = "dev/terraform.tfstate"
-    region         = "us-east-1"          
-    encrypt        = true
-    dynamodb_table = "novabank-terraform-locks-dev"
+    # Filled in via -backend-config, or hardcode after bootstrap_state.sh:
+    # bucket         = "novabank-terraform-state-dev"
+    # key            = "dev/terraform.tfstate"
+    # region         = "eu-west-1"
+    # dynamodb_table = "novabank-terraform-locks-dev"
+    # encrypt        = true
   }
 }
 
-# ── Providers ──────────────────────────────────────────────────────────────────
 provider "aws" {
   region = var.aws_region
 
   default_tags {
-    tags = {
-      Project     = "novabank"
-      Environment = "dev"
-      ManagedBy   = "terraform"
-    }
+    tags = local.common_tags
   }
 }
 
-# Second provider alias for us-east-1 (required for WAF + CloudFront ACM)
-provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
+# Used to authenticate the kubernetes/helm providers against the EKS cluster
+# created by module.eks in this same apply. Requires the cluster to already
+# exist, hence the two-pass apply described in the README.
+data "aws_eks_cluster_auth" "this" {
+  name = module.eks.cluster_name
+}
 
-  default_tags {
-    tags = {
-      Project     = "novabank"
-      Environment = "dev"
-      ManagedBy   = "terraform"
-    }
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  token                  = data.aws_eks_cluster_auth.this.token
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+    token                  = data.aws_eks_cluster_auth.this.token
   }
 }

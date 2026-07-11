@@ -9,6 +9,7 @@ DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
     raise RuntimeError("DATABASE_URL env var is required — injected by ECS entrypoint from Secrets Manager")
 NOTIFICATIONS_URL = os.getenv("NOTIFICATIONS_URL","http://notifications-service:8004")
+TRANSACTIONS_URL = os.getenv("TRANSACTIONS_URL","http://transactions-service:8003")
 
 logging.basicConfig(level=logging.INFO,
   format='{"t":"%(asctime)s","svc":"accounts","msg":"%(message)s"}')
@@ -72,16 +73,24 @@ def init_db():
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             );
             CREATE TABLE IF NOT EXISTS loans (
-                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                account_id  UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                loan_type   TEXT NOT NULL,
-                total       NUMERIC(15,2) NOT NULL,
-                monthly     NUMERIC(15,2) NOT NULL,
-                paid        NUMERIC(15,2) DEFAULT 0,
-                years       INT NOT NULL,
-                purpose     TEXT DEFAULT '',
-                status      TEXT DEFAULT 'pending',
-                created_at  TIMESTAMPTZ DEFAULT NOW()
+                id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                account_id         UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                loan_type          TEXT NOT NULL,
+                total              NUMERIC(15,2) NOT NULL,
+                monthly            NUMERIC(15,2) NOT NULL,
+                paid               NUMERIC(15,2) DEFAULT 0,
+                years              INT NOT NULL,
+                purpose            TEXT DEFAULT '',
+                status             TEXT NOT NULL DEFAULT 'pending'
+                                   CHECK (status IN ('pending','approved','rejected','cancelled')),
+                requested_by_role  TEXT NOT NULL DEFAULT 'customer'
+                                   CHECK (requested_by_role IN ('customer','teller')),
+                requested_by_id    UUID,
+                reviewed_by_id     UUID,
+                reviewed_by_role   TEXT,
+                decision_note      TEXT,
+                decided_at         TIMESTAMPTZ,
+                created_at         TIMESTAMPTZ DEFAULT NOW()
             );
             CREATE TABLE IF NOT EXISTS portfolio (
                 id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -107,6 +116,17 @@ def notify(user_id, title, body, ntype="system"):
         httpx.post(f"{NOTIFICATIONS_URL}/internal/create",
                    json={"user_id":user_id,"title":title,"body":body,"type":ntype},timeout=3)
     except: pass
+
+def call_transactions(method, path, json_body=None):
+    try:
+        r = httpx.request(method, f"{TRANSACTIONS_URL}{path}", json=json_body, timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, e.response.json().get("detail","خطأ في transactions-service"))
+    except Exception as e:
+        raise HTTPException(500, f"تعذر الاتصال بـ transactions-service: {e}")
+
 
 def row2dict(row):
     if row is None: return None
@@ -207,6 +227,25 @@ def get_all():
             cur.execute("SELECT * FROM accounts ORDER BY created_at DESC")
             rows = cur.fetchall()
     return {"accounts":[row2dict(r) for r in rows]}
+
+
+@app.get("/accounts/loans")
+def list_all_loans(status: Optional[str] = None):
+    with conn() as c:
+        with c.cursor() as cur:
+            if status:
+                cur.execute("""
+                    SELECT l.*, a.account_number, a.first_name, a.last_name
+                    FROM loans l JOIN accounts a ON a.id = l.account_id
+                    WHERE l.status=%s ORDER BY l.created_at DESC""",(status,))
+            else:
+                cur.execute("""
+                    SELECT l.*, a.account_number, a.first_name, a.last_name
+                    FROM loans l JOIN accounts a ON a.id = l.account_id
+                    ORDER BY l.created_at DESC""")
+            return {"loans":[row2dict(r) for r in cur.fetchall()]}
+
+
 
 @app.get("/accounts/{account_id}")
 def get_account(account_id: str):
@@ -348,6 +387,140 @@ def apply_loan(account_id: str, data: dict):
             loan = row2dict(cur.fetchone())
         c.commit()
     return {"ok":True,"loan":loan,"monthlyPayment":mo}
+
+
+@app.post("/accounts/{account_id}/loans/teller-request")
+def teller_apply_loan(account_id: str, data: dict):
+    amt  = float(data["amount"])
+    yrs  = int(data["years"])
+    tid  = data.get("tellerId")
+    if not tid:
+        raise HTTPException(400, "بيانات الموظف مطلوبة")
+    r    = 0.12/12
+    n    = yrs*12
+    mo   = round(amt*(r*(1+r)**n)/((1+r)**n-1),2)
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute("""INSERT INTO loans(account_id,loan_type,total,monthly,years,purpose,requested_by_role,requested_by_id)
+                VALUES(%s,%s,%s,%s,%s,%s,'teller',%s) RETURNING *""",
+                (account_id,data["loanType"],amt,mo,yrs,data.get("purpose",""),tid))
+            loan = row2dict(cur.fetchone())
+        c.commit()
+    return {"ok":True,"loan":loan,"monthlyPayment":mo}
+
+
+
+@app.put("/accounts/loans/{loan_id}/cancel")
+def cancel_loan(loan_id: str, data: dict):
+    teller_id   = data.get("tellerId")
+    teller_name = data.get("tellerName","")
+    if not teller_id:
+        raise HTTPException(400,"بيانات الموظف مطلوبة")
+
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT * FROM loans WHERE id=%s",(loan_id,))
+            loan = cur.fetchone()
+            if not loan:
+                raise HTTPException(404,"الطلب غير موجود")
+            if loan["status"] != "pending":
+                raise HTTPException(400,"لا يمكن إلغاء طلب تم البت فيه بالفعل")
+            cur.execute("""UPDATE loans SET status='cancelled', reviewed_by_id=%s,
+                reviewed_by_role='teller', decision_note=%s, decided_at=NOW()
+                WHERE id=%s RETURNING *""",
+                (teller_id, f"أُلغي بواسطة الموظف: {teller_name}" if teller_name else "أُلغي بواسطة موظف", loan_id))
+            updated = row2dict(cur.fetchone())
+        c.commit()
+
+    cur_acc = None
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT user_id FROM accounts WHERE id=%s",(loan["account_id"],))
+            cur_acc = cur.fetchone()
+    if cur_acc:
+        notify(str(cur_acc["user_id"]), "🚫 تم إلغاء طلب القرض",
+               f"تم إلغاء طلب {loan['loan_type']} الخاص بك من قِبل أحد الموظفين.")
+
+    return {"ok":True,"loan":updated}
+
+@app.put("/accounts/loans/{loan_id}/approve")
+def approve_loan(loan_id: str, data: dict):
+    reviewer_id   = data.get("reviewerId")
+    reviewer_role = data.get("reviewerRole")
+    reviewer_name = data.get("reviewerName","")
+    if reviewer_role not in ("admin","supervisor"):
+        raise HTTPException(403,"مدراء ومشرفون فقط")
+    if not reviewer_id:
+        raise HTTPException(400,"بيانات المراجع مطلوبة")
+
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT * FROM loans WHERE id=%s",(loan_id,))
+            loan = cur.fetchone()
+            if not loan:
+                raise HTTPException(404,"الطلب غير موجود")
+            if loan["status"] != "pending":
+                raise HTTPException(400,"تم البت في هذا الطلب من قبل")
+            cur.execute("""UPDATE loans SET status='approved', reviewed_by_id=%s,
+                reviewed_by_role=%s, decided_at=NOW() WHERE id=%s RETURNING *""",
+                (reviewer_id,reviewer_role,loan_id))
+            updated = row2dict(cur.fetchone())
+        c.commit()
+
+    # صرف المبلغ فعليًا + تسجيله كمعاملة حقيقية في transactions-service
+    call_transactions("POST","/transactions/loan-credit",{
+        "accountId": str(loan["account_id"]),
+        "amount": float(loan["total"]),
+        "loanType": loan["loan_type"],
+        "reviewerName": reviewer_name,
+    })
+
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT user_id FROM accounts WHERE id=%s",(loan["account_id"],))
+            acc = cur.fetchone()
+    if acc:
+        notify(str(acc["user_id"]), "✅ تمت الموافقة على قرضك",
+               f"تمت الموافقة على طلب {loan['loan_type']} بمبلغ {loan['total']} EGP وتم إضافته لرصيدك.")
+
+    return {"ok":True,"loan":updated}
+
+
+@app.put("/accounts/loans/{loan_id}/reject")
+def reject_loan(loan_id: str, data: dict):
+    reviewer_id   = data.get("reviewerId")
+    reviewer_role = data.get("reviewerRole")
+    note          = data.get("note","")
+    if reviewer_role not in ("admin","supervisor"):
+        raise HTTPException(403,"مدراء ومشرفون فقط")
+    if not reviewer_id:
+        raise HTTPException(400,"بيانات المراجع مطلوبة")
+
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT * FROM loans WHERE id=%s",(loan_id,))
+            loan = cur.fetchone()
+            if not loan:
+                raise HTTPException(404,"الطلب غير موجود")
+            if loan["status"] != "pending":
+                raise HTTPException(400,"تم البت في هذا الطلب من قبل")
+            cur.execute("""UPDATE loans SET status='rejected', reviewed_by_id=%s,
+                reviewed_by_role=%s, decision_note=%s, decided_at=NOW() WHERE id=%s RETURNING *""",
+                (reviewer_id,reviewer_role,note,loan_id))
+            updated = row2dict(cur.fetchone())
+        c.commit()
+
+    with conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT user_id FROM accounts WHERE id=%s",(loan["account_id"],))
+            acc = cur.fetchone()
+    if acc:
+        notify(str(acc["user_id"]), "❌ تم رفض طلب القرض",
+               f"للأسف تم رفض طلب {loan['loan_type']}." + (f" السبب: {note}" if note else ""))
+
+    return {"ok":True,"loan":updated}
+
+
 
 # ── Portfolio ──────────────────────────────────────────────────────────
 @app.get("/accounts/{account_id}/portfolio")
