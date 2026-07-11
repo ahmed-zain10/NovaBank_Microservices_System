@@ -46,6 +46,18 @@ provider "aws" {
   }
 }
 
+# CLOUDFRONT-scope WAFv2 Web ACLs (modules/waf) must be created in
+# us-east-1 regardless of the main region — same rule as ACM certs
+# used by CloudFront.
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+
+  default_tags {
+    tags = local.common_tags
+  }
+}
+
 # Used to authenticate the kubernetes/helm providers against the EKS cluster
 # created by module.eks in this same apply. Requires the cluster to already
 # exist, hence the two-pass apply described in the README.

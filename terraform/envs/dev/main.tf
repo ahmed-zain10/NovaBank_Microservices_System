@@ -41,9 +41,11 @@ locals {
 module "vpc" {
   source = "../../modules/vpc"
 
-  environment = local.environment
-  vpc_cidr    = var.vpc_cidr
-  az_count    = var.az_count
+  environment        = local.environment
+  cluster_name       = local.cluster_name
+  vpc_cidr           = var.vpc_cidr
+  az_count           = var.az_count
+  single_nat_gateway = var.single_nat_gateway
 
   tags = local.common_tags
 }
@@ -51,9 +53,10 @@ module "vpc" {
 module "security_groups" {
   source = "../../modules/security-groups"
 
-  environment = local.environment
-  vpc_id      = module.vpc.vpc_id
-  vpc_cidr    = var.vpc_cidr
+  environment  = local.environment
+  cluster_name = local.cluster_name
+  vpc_id       = module.vpc.vpc_id
+  vpc_cidr     = var.vpc_cidr
 
   tags = local.common_tags
 }
@@ -279,6 +282,10 @@ module "kubernetes" {
 
 module "waf" {
   source = "../../modules/waf"
+
+  providers = {
+    aws = aws.us_east_1
+  }
 
   environment         = local.environment
   teller_allowed_ips  = var.teller_allowed_ips
