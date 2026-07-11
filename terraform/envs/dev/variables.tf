@@ -8,6 +8,19 @@ variable "aws_region" {
   default     = "eu-west-1"
 }
 
+variable "image_tag" {
+  description = <<-EOT
+    Docker image tag passed by the Jenkins pipeline (e.g. v1.0.0, or a git SHA).
+    Not consumed directly by any Terraform resource in this EKS setup (image
+    tags are set in Kubernetes Deployment manifests, not in Terraform), but
+    declared here so `terraform plan -var="image_tag=..."` from the pipeline
+    doesn't fail. Safe to reference later if you add an ECR lifecycle policy
+    or a data source keyed on it.
+  EOT
+  type    = string
+  default = "latest"
+}
+
 # ---------------- Networking ----------------
 
 variable "vpc_cidr" {
@@ -20,6 +33,12 @@ variable "az_count" {
   description = "Number of availability zones to spread subnets across"
   type        = number
   default     = 2
+}
+
+variable "single_nat_gateway" {
+  description = "Use a single shared NAT Gateway instead of one per AZ. True in dev to save cost."
+  type        = bool
+  default     = true
 }
 
 # ---------------- RDS ----------------

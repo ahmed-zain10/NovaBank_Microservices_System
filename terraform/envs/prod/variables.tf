@@ -8,6 +8,12 @@ variable "aws_region" {
   default     = "eu-west-1"
 }
 
+variable "image_tag" {
+  description = "Docker image tag passed by the Jenkins pipeline. Not consumed directly by Terraform in this EKS setup, declared to avoid plan errors."
+  type        = string
+  default     = "latest"
+}
+
 # ---------------- Networking ----------------
 
 variable "vpc_cidr" {
