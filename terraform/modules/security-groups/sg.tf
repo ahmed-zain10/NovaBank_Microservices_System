@@ -80,6 +80,42 @@ resource "aws_security_group_rule" "rds_ingress_from_nodes" {
   source_security_group_id = aws_security_group.eks_nodes.id
 }
 
+# ------------------------------------------------------------------
+# DB Init Lambda Security Group
+# The Lambda function that initializes RDS schemas/users runs inside
+# the VPC (private subnets) so it can reach RDS directly. It needs
+# its own SG, separate from the EKS node SG.
+# ------------------------------------------------------------------
+
+resource "aws_security_group" "lambda" {
+  name        = "${var.environment}-db-init-lambda-sg"
+  description = "Security group for the DB init Lambda function"
+  vpc_id      = var.vpc_id
+
+  egress {
+    description = "Allow all outbound (RDS access, AWS API calls via VPC endpoints or NAT)"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(
+    var.tags,
+    { Name = "${var.environment}-db-init-lambda-sg" }
+  )
+}
+
+resource "aws_security_group_rule" "rds_ingress_from_lambda" {
+  description              = "Allow Postgres access from the DB init Lambda"
+  type                     = "ingress"
+  from_port                = var.rds_port
+  to_port                  = var.rds_port
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.rds.id
+  source_security_group_id = aws_security_group.lambda.id
+}
+
 resource "aws_security_group_rule" "rds_egress" {
   description       = "Allow all outbound from RDS (needed for extensions, patching)"
   type              = "egress"

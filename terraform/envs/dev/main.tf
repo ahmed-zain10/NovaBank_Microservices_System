@@ -82,15 +82,20 @@ module "ecr" {
 module "rds" {
   source = "../../modules/rds"
 
-  environment           = local.environment
-  vpc_id                = module.vpc.vpc_id
-  subnet_ids            = module.vpc.private_subnet_ids
-  security_group_id     = module.security_groups.rds_security_group_id
-  instance_class        = var.rds_instance_class
-  multi_az              = var.rds_multi_az
-  backup_retention_days = var.rds_backup_retention_days
-  deletion_protection   = var.rds_deletion_protection
-  db_credentials_secret_arn = module.secrets.db_credentials_secret_arn
+  project = "novabank"
+  env     = local.environment
+
+  private_subnet_ids = module.vpc.private_subnet_ids
+  rds_sg_id          = module.security_groups.rds_security_group_id
+  lambda_sg_id       = module.security_groups.lambda_security_group_id
+  kms_key_arn        = module.secrets.kms_key_arn
+
+  rds_master_username    = module.secrets.db_master_username
+  rds_master_password    = module.secrets.db_master_password
+  rds_master_secret_arn  = module.secrets.db_credentials_secret_arn
+  schema_secret_arns     = module.secrets.schema_secret_arns
+
+  db_instance_class = var.rds_instance_class
 
   tags = local.common_tags
 }

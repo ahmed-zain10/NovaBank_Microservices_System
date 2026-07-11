@@ -18,8 +18,24 @@ output "kms_alias_name" {
 }
 
 output "db_credentials_secret_arn" {
-  description = "Secrets Manager ARN holding the RDS master username/password (feed into modules/rds -> db_credentials_secret_arn)"
+  description = "Secrets Manager ARN holding the RDS master username/password (feed into modules/rds -> rds_master_secret_arn)"
   value       = aws_secretsmanager_secret.db_credentials.arn
+}
+
+output "db_master_username" {
+  description = "RDS master username (feed into modules/rds -> rds_master_username)"
+  value       = var.db_master_username
+}
+
+output "db_master_password" {
+  description = "RDS master password (feed into modules/rds -> rds_master_password). Sensitive."
+  value       = random_password.db_master.result
+  sensitive   = true
+}
+
+output "schema_secret_arns" {
+  description = "Map of schema name -> Secrets Manager ARN holding that schema's DB user credentials (feed into modules/rds -> schema_secret_arns)"
+  value       = { for schema, secret in aws_secretsmanager_secret.schema_credentials : schema => secret.arn }
 }
 
 output "jwt_signing_key_secret_arn" {

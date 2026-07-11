@@ -8,8 +8,13 @@ output "eks_node_security_group_id" {
 }
 
 output "rds_security_group_id" {
-  description = "Security group ID for RDS (feed into modules/rds -> security_group_id)"
+  description = "Security group ID for RDS (feed into modules/rds -> rds_sg_id)"
   value       = aws_security_group.rds.id
+}
+
+output "lambda_security_group_id" {
+  description = "Security group ID for the DB init Lambda (feed into modules/rds -> lambda_sg_id)"
+  value       = aws_security_group.lambda.id
 }
 
 output "vpc_endpoints_security_group_id" {

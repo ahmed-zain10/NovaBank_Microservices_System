@@ -25,6 +25,12 @@ variable "db_master_username" {
   default     = "novabank_admin"
 }
 
+variable "db_schemas" {
+  description = "Set of PostgreSQL schema names to create per-schema DB user credentials for (mirrors modules/rds schema init)"
+  type        = set(string)
+  default     = ["auth", "accounts", "transactions", "notifications"]
+}
+
 variable "services" {
   description = <<-EOT
     Map of per-service secrets to create. key = service name (must match

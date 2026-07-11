@@ -116,6 +116,47 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
 }
 
 # ------------------------------------------------------------------
+# Per-schema DB user credentials
+# One Secrets Manager secret per PostgreSQL schema/user (auth_user,
+# accounts_user, transactions_user, notifications_user), consumed by
+# modules/rds -> schema_secret_arns and used by the DB init Lambda to
+# actually create the schema + user + grant with these credentials.
+# ------------------------------------------------------------------
+
+resource "random_password" "schema_users" {
+  for_each = var.db_schemas
+
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
+resource "aws_secretsmanager_secret" "schema_credentials" {
+  for_each = var.db_schemas
+
+  name                    = "novabank/${var.environment}/db-schema-${each.key}"
+  kms_key_id              = aws_kms_key.main.arn
+  recovery_window_in_days = var.secret_recovery_window_days
+
+  tags = merge(
+    var.tags,
+    { Name = "${var.environment}-db-schema-${each.key}" }
+  )
+}
+
+resource "aws_secretsmanager_secret_version" "schema_credentials" {
+  for_each = var.db_schemas
+
+  secret_id = aws_secretsmanager_secret.schema_credentials[each.key].id
+
+  secret_string = jsonencode({
+    username = "${each.key}_user"
+    password = random_password.schema_users[each.key].result
+    schema   = each.key
+  })
+}
+
+# ------------------------------------------------------------------
 # JWT signing secret
 # Used by auth-service to sign/verify tokens across all services.
 # ------------------------------------------------------------------
