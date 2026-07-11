@@ -31,7 +31,7 @@ terraform {
   backend "s3" {
     bucket         = "novabank-terraform-state-dev"
     key            = "dev/terraform.tfstate"
-    region         = "eu-west-1"
+    region         = "us-east-1"
     dynamodb_table = "novabank-terraform-locks-dev"
     encrypt        = true
   }
