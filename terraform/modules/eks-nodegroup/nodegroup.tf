@@ -84,7 +84,10 @@ resource "aws_eks_node_group" "this" {
   subnet_ids      = var.subnet_ids
 
   capacity_type  = var.capacity_type # ON_DEMAND or SPOT
-  instance_types = var.instance_types
+  # NOTE: instance_types is intentionally NOT set here — AWS EKS rejects
+  # a node group that specifies instance types both in the launch template
+  # AND in the node group's own API request. Since our launch template
+  # already pins instance_type (see above), it's the single source of truth.
 
   launch_template {
     id      = aws_launch_template.this.id
