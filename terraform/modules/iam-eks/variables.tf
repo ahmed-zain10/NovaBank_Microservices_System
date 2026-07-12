@@ -13,6 +13,12 @@ variable "enable_ssm_on_nodes" {
   default     = true
 }
 
+variable "create_base_roles" {
+  description = "Whether to create the cluster_role/node_role/instance_profile in this call. Set to false when calling this module a second time (e.g. for IRSA-only roles) to avoid duplicate/conflicting IAM role names."
+  type        = bool
+  default     = true
+}
+
 variable "oidc_provider_arn" {
   description = "ARN of the IAM OIDC provider for this cluster (from modules/oidc). Required only if irsa_roles is non-empty."
   type        = string

@@ -19,6 +19,7 @@ data "aws_iam_policy_document" "eks_cluster_assume_role" {
 }
 
 resource "aws_iam_role" "eks_cluster" {
+  count              = var.create_base_roles ? 1 : 0
   name               = "${var.cluster_name}-eks-cluster-role"
   assume_role_policy = data.aws_iam_policy_document.eks_cluster_assume_role.json
 
@@ -29,13 +30,15 @@ resource "aws_iam_role" "eks_cluster" {
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
-  role       = aws_iam_role.eks_cluster.name
+  count      = var.create_base_roles ? 1 : 0
+  role       = aws_iam_role.eks_cluster[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
 # Required if the control plane also manages VPC resources (ENIs) directly
 resource "aws_iam_role_policy_attachment" "eks_vpc_resource_controller" {
-  role       = aws_iam_role.eks_cluster.name
+  count      = var.create_base_roles ? 1 : 0
+  role       = aws_iam_role.eks_cluster[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
 }
 
@@ -56,6 +59,7 @@ data "aws_iam_policy_document" "eks_node_assume_role" {
 }
 
 resource "aws_iam_role" "eks_node" {
+  count              = var.create_base_roles ? 1 : 0
   name               = "${var.cluster_name}-eks-node-role"
   assume_role_policy = data.aws_iam_policy_document.eks_node_assume_role.json
 
@@ -66,30 +70,34 @@ resource "aws_iam_role" "eks_node" {
 }
 
 resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
-  role       = aws_iam_role.eks_node.name
+  count      = var.create_base_roles ? 1 : 0
+  role       = aws_iam_role.eks_node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cni_policy" {
-  role       = aws_iam_role.eks_node.name
+  count      = var.create_base_roles ? 1 : 0
+  role       = aws_iam_role.eks_node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }
 
 resource "aws_iam_role_policy_attachment" "ecr_read_only" {
-  role       = aws_iam_role.eks_node.name
+  count      = var.create_base_roles ? 1 : 0
+  role       = aws_iam_role.eks_node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
 # Lets you exec into nodes via Session Manager instead of opening SSH (better for a bank)
 resource "aws_iam_role_policy_attachment" "ssm_managed_instance" {
-  count      = var.enable_ssm_on_nodes ? 1 : 0
-  role       = aws_iam_role.eks_node.name
+  count      = var.create_base_roles && var.enable_ssm_on_nodes ? 1 : 0
+  role       = aws_iam_role.eks_node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 resource "aws_iam_instance_profile" "eks_node" {
-  name = "${var.cluster_name}-eks-node-profile"
-  role = aws_iam_role.eks_node.name
+  count = var.create_base_roles ? 1 : 0
+  name  = "${var.cluster_name}-eks-node-profile"
+  role  = aws_iam_role.eks_node[0].name
 }
 
 #############################

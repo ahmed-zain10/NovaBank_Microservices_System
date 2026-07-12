@@ -182,6 +182,7 @@ module "iam_eks_irsa" {
   source = "../../modules/iam-eks"
 
   cluster_name      = "${local.cluster_name}-irsa"
+  create_base_roles = false
   oidc_provider_arn = module.oidc.oidc_provider_arn
   oidc_provider_url = module.oidc.oidc_provider_url
 
