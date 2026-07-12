@@ -71,7 +71,7 @@ variable "cluster_name" {
 variable "kubernetes_version" {
   description = "Kubernetes version for the EKS control plane"
   type        = string
-  default     = "1.33"
+  default     = "1.32"
 }
 
 variable "eks_endpoint_public_access" {
@@ -81,9 +81,9 @@ variable "eks_endpoint_public_access" {
 }
 
 variable "eks_public_access_cidrs" {
-  description = "CIDR blocks allowed to reach the public EKS API endpoint, if enabled"
+  description = "CIDR blocks allowed to reach the public EKS API endpoint, if enabled. Defaults to 0.0.0.0/0 to match what AWS auto-fills."
   type        = list(string)
-  default     = []
+  default     = ["0.0.0.0/0"]
 }
 
 variable "log_retention_days" {
