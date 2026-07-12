@@ -94,9 +94,9 @@ variable "eks_endpoint_public_access" {
 }
 
 variable "eks_public_access_cidrs" {
-  description = "CIDR blocks allowed to reach the public EKS API endpoint, if enabled"
+  description = "CIDR blocks allowed to reach the public EKS API endpoint, if enabled. Defaults to 0.0.0.0/0 to match what AWS auto-fills — leaving this empty causes Terraform to detect a false diff on every apply."
   type        = list(string)
-  default     = []
+  default     = ["0.0.0.0/0"]
 }
 
 variable "log_retention_days" {
