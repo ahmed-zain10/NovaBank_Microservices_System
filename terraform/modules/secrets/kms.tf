@@ -59,6 +59,52 @@ data "aws_iam_policy_document" "kms_key_policy" {
 
     resources = ["*"]
   }
+
+  # Required for the EKS Managed Node Group's Auto Scaling Group to
+  # launch EC2 instances with an encrypted (customer-managed KMS key)
+  # EBS root volume. Without this, node creation fails with
+  # "InvalidKMSKey.InvalidState".
+  statement {
+    sid    = "AllowAutoScalingGrantCreation"
+    effect = "Allow"
+    actions = [
+      "kms:CreateGrant",
+      "kms:ListGrants",
+      "kms:RevokeGrant",
+    ]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"]
+    }
+
+    resources = ["*"]
+
+    condition {
+      test     = "Bool"
+      variable = "kms:GrantIsForAWSResource"
+      values   = ["true"]
+    }
+  }
+
+  statement {
+    sid    = "AllowAutoScalingUseOfKey"
+    effect = "Allow"
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey*",
+      "kms:ReEncrypt*",
+    ]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"]
+    }
+
+    resources = ["*"]
+  }
 }
 
 resource "aws_kms_key" "main" {

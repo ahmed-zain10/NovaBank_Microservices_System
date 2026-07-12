@@ -59,7 +59,7 @@ resource "aws_db_instance" "main" {
 
   # Engine
   engine               = "postgres"
-  engine_version       = "15.7"
+  engine_version       = "15.18"
   instance_class       = var.db_instance_class
   parameter_group_name = aws_db_parameter_group.main.name
 
