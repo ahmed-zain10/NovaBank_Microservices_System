@@ -25,7 +25,7 @@ variable "nodegroup_name" {
 variable "kubernetes_version" {
   description = "Kubernetes version, used to pick the correct EKS-optimized AMI via SSM"
   type        = string
-  default     = "1.29"
+  default     = "1.32"
 }
 
 variable "ami_id" {

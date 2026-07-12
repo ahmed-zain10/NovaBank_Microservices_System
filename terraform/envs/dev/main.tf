@@ -325,6 +325,7 @@ module "waf" {
 }
 
 module "cloudfront" {
+  count  = var.alb_origin_domain != "" ? 1 : 0
   source = "../../modules/cloudfront"
 
   environment                    = local.environment
