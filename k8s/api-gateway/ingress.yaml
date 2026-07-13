@@ -1,0 +1,46 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway-ingress
+  namespace: api-gateway
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # Shared across all 3 Ingress objects (this one + the two frontends)
+    # so the AWS Load Balancer Controller merges them into ONE ALB
+    # instead of creating three.
+    alb.ingress.kubernetes.io/group.name: novabank-dev
+    alb.ingress.kubernetes.io/group.order: "10"
+
+    # ------------------------------------------------------------------
+    # TODO before production: enforce the CloudFront -> ALB secret header.
+    # Value comes from modules/cloudfront's `origin_verify_secret_value`
+    # output (sensitive). Example:
+    #
+    # alb.ingress.kubernetes.io/conditions.api-gateway: >
+    #   [{"field":"http-header","httpHeaderConfig":{"httpHeaderName":
+    #   "X-Origin-Verify","values":["<PASTE_SECRET_HERE>"]}}]
+    # ------------------------------------------------------------------
+spec:
+  rules:
+    - host: "${CUSTOMER_DOMAIN}"
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8000
+    - host: "${TELLER_DOMAIN}"
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8000

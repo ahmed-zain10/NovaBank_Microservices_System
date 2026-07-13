@@ -1,11 +1,37 @@
 // ============================================================
-// NovaBank — Pipeline 1: Full Deploy (من الصفر)
+// NovaBank — Pipeline 1: Full Deploy (من الصفر) — EKS Edition
+// ============================================================
+//
+// ✅ مبني على مراجعة فعلية لملفات k8s/ الحقيقية بتاعتك. الهيكل هو:
+//
+//   k8s/
+//     api-gateway/            (Deployment + Service + Ingress)
+//     auth-service/           (Deployment + Service)
+//     accounts-service/       (Deployment + Service)
+//     transactions-service/   (Deployment + Service)
+//     notifications-service/  (Deployment + Service)
+//     frontend-customers/     (Deployment + Service + Ingress)
+//     frontend-teller/        (Deployment + Service + Ingress)
+//
+// اسم الفولدر = اسم الـ service (وده اللي بيتستخدم في `k8s apply`)
+// namespace: بيتحدد جوه كل YAML نفسه ومطابق لهذا الجدول:
+//   api-gateway -> api-gateway | auth-service -> auth
+//   accounts-service -> accounts | transactions-service -> transactions
+//   notifications-service -> notifications
+//   frontend-customers -> frontend-customers | frontend-teller -> frontend-teller
+//
+// ⚠️ الملفات فيها placeholders (${AWS_ACCOUNT_ID}, ${AWS_REGION}, ${IMAGE_TAG},
+// ${CUSTOMER_DOMAIN}, ${TELLER_DOMAIN}) — بيتم حقنها بـ envsubst قبل kubectl apply.
+//
+// ⚠️ لازم تتأكد إن الـ secrets (novabank/dev/rds/<schema>) فيها مفتاح "host"
+// (RDS endpoint) جوه الـ JSON، لأن الـ Deployments مبتمررش RDS host كـ env var
+// منفصل — الكود المفروض يجيبه من جوه السيكريت نفسه.
 // ============================================================
 pipeline {
     agent any
 
     options {
-        timeout(time: 60, unit: 'MINUTES')
+        timeout(time: 90, unit: 'MINUTES')
         disableConcurrentBuilds()
     }
 
@@ -16,7 +42,11 @@ pipeline {
         PROJECT         = 'novabank'
         REGISTRY        = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         TF_DIR          = 'terraform/envs/dev'
-        CLUSTER         = 'novabank-dev-cluster'
+        CLUSTER         = 'novabank-dev'   // ← اسم الـ EKS cluster (مش ECS)
+
+        // لازم تطابق terraform.tfvars بتاعة dev — مستخدمة في الـ Ingress hosts (envsubst)
+        CUSTOMER_DOMAIN = 'app-dev.novabank-eg.com'
+        TELLER_DOMAIN   = 'teller-dev.novabank-eg.com'
     }
 
     parameters {
@@ -31,7 +61,7 @@ pipeline {
                 sh '''
                     echo "=== Checking dependencies ==="
 
-                    # AWS CLI — لو موجودة نعمل update، لو مش موجودة نعمل install
+                    # AWS CLI
                     if command -v aws &>/dev/null; then
                         echo "AWS CLI already installed: $(aws --version)"
                     else
@@ -46,7 +76,7 @@ pipeline {
 
                     # Terraform
                     if command -v terraform &>/dev/null; then
-                        echo "Terraform already installed: $(terraform version -json | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"terraform_version\"])')"
+                        echo "Terraform already installed: $(terraform version -json | python3 -c 'import sys,json; print(json.load(sys.stdin)["terraform_version"])')"
                     else
                         echo "Installing Terraform..."
                         curl -fsSL "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" \
@@ -58,12 +88,47 @@ pipeline {
                     fi
                     terraform --version
 
+                    # kubectl
+                    if command -v kubectl &>/dev/null; then
+                        echo "kubectl already installed: $(kubectl version --client -o json | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"clientVersion\"][\"gitVersion\"])')"
+                    else
+                        echo "Installing kubectl..."
+                        KVER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+                        curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o /tmp/kubectl
+                        sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+                        rm -f /tmp/kubectl
+                        echo "kubectl installed: $(kubectl version --client --short 2>/dev/null || kubectl version --client)"
+                    fi
+
+                    # Helm (مطلوب لو محتاج تعمل helm upgrade يدوي على ALB controller / autoscaler لاحقًا)
+                    if command -v helm &>/dev/null; then
+                        echo "Helm already installed: $(helm version --short)"
+                    else
+                        echo "Installing Helm..."
+                        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -o /tmp/get_helm.sh
+                        chmod +x /tmp/get_helm.sh
+                        sudo /tmp/get_helm.sh
+                        rm -f /tmp/get_helm.sh
+                        echo "Helm installed"
+                    fi
+
                     # Docker
                     if command -v docker &>/dev/null; then
                         echo "Docker already installed: $(docker --version)"
                     else
                         echo "❌ Docker not found — ده لازم يكون مثبت على الـ Jenkins server"
                         exit 1
+                    fi
+
+                    # envsubst (مطلوب لحقن AWS_ACCOUNT_ID/AWS_REGION/IMAGE_TAG/CUSTOMER_DOMAIN/TELLER_DOMAIN
+                    # جوه ملفات k8s/*/*.yaml قبل kubectl apply)
+                    if command -v envsubst &>/dev/null; then
+                        echo "envsubst already installed"
+                    else
+                        echo "Installing gettext-base (envsubst)..."
+                        sudo apt-get update -qq
+                        sudo apt-get install -y -qq gettext-base
+                        echo "envsubst installed"
                     fi
 
                     echo "✅ All dependencies ready"
@@ -114,8 +179,7 @@ pipeline {
             }
         }
 
-        // ── 6. Terraform Init ──────────────────────────────────
-
+        // ── 5. Terraform Init ──────────────────────────────────
         stage('Terraform Init') {
             steps {
                 withCredentials([
@@ -139,7 +203,7 @@ pipeline {
             }
         }
 
-        // ── 7. Import Existing Secrets ─────────────────────────
+        // ── 6. Import Existing Secrets ─────────────────────────
         stage('Import Secrets') {
             steps {
                 withCredentials([
@@ -184,7 +248,7 @@ pipeline {
             }
         }
 
-        // ── 8. Terraform Plan ──────────────────────────────────
+        // ── 7. Terraform Plan ──────────────────────────────────
         stage('Terraform Plan') {
             steps {
                 withCredentials([
@@ -206,7 +270,7 @@ pipeline {
             }
         }
 
-        // ── 9. Terraform Apply ─────────────────────────────────
+        // ── 8. Terraform Apply ─────────────────────────────────
         stage('Terraform Apply') {
             steps {
                 withCredentials([
@@ -216,27 +280,51 @@ pipeline {
                         echo "=== Terraform Apply ==="
                         cd ${TF_DIR}
                         terraform apply -auto-approve tfplan
-                        echo "✅ Infrastructure deployed"
+                        echo "✅ Infrastructure deployed (VPC, EKS, RDS, ECR, IAM, addons, helm controllers...)"
                     '''
                 }
             }
         }
 
-        // ── 10. Fix Secret DBNames ────────────────────────────
+        // ── 9. Update kubeconfig ───────────────────────────────
+        stage('Update kubeconfig') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    sh '''
+                        echo "=== Pointing kubectl at the EKS cluster ==="
+                        aws eks update-kubeconfig --name ${CLUSTER} --region ${AWS_REGION}
+                        kubectl get nodes
+                        echo "✅ kubeconfig updated"
+                    '''
+                }
+            }
+        }
+
+        // ── 10. Fix Secret DBNames ──────────────────────────────
         stage('Fix Secret DBNames') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
                 ]) {
                     sh '''
-                        echo "=== Fixing dbname in secrets ==="
+                        echo "=== Fixing dbname/host/port in secrets ==="
 
-                        cat > /tmp/fix_secrets.py << 'SCRIPTEOF'
+                        RDS_HOST=$(aws rds describe-db-instances \
+                            --db-instance-identifier novabank-${ENV}-rds \
+                            --region ${AWS_REGION} \
+                            --query 'DBInstances[0].Endpoint.Address' \
+                            --output text)
+                        echo "RDS Host: ${RDS_HOST}"
+
+                        cat > /tmp/fix_secrets.py << SCRIPTEOF
 import json, subprocess, re
 
 schemas = ['auth', 'accounts', 'transactions', 'notifications']
-region  = 'us-east-1'
-env     = 'dev'
+region  = '${AWS_REGION}'
+env     = '${ENV}'
+rds_host = '${RDS_HOST}'
 
 for schema in schemas:
     secret_id = f'novabank/{env}/rds/{schema}'
@@ -252,18 +340,17 @@ for schema in schemas:
 
     raw = r.stdout.strip()
 
-    # Try standard JSON first
     try:
         current = json.loads(raw)
     except json.JSONDecodeError:
-        # Handle non-quoted format: {key:value,key:value}
         current = {}
         for match in re.finditer(r'([a-zA-Z0-9_]+):([^,}]+)', raw):
             current[match.group(1)] = match.group(2).strip()
 
-    # Fix dbname and schema
     current['dbname'] = 'novabank'
     current['schema'] = schema
+    current['host']   = rds_host
+    current['port']   = 5432
     new_val = json.dumps(current)
 
     subprocess.run(
@@ -275,7 +362,7 @@ for schema in schemas:
          '--output', 'text'],
         capture_output=True, text=True, check=True
     )
-    print(f'  Fixed: {secret_id}')
+    print(f'  Fixed: {secret_id} (host={rds_host})')
 
 print('All secrets fixed')
 SCRIPTEOF
@@ -287,7 +374,7 @@ SCRIPTEOF
             }
         }
 
-        // ── 11. Deploy Lambda ─────────────────────────────────
+        // ── 11. Deploy Lambda ───────────────────────────────────
         stage('Deploy Lambda') {
             steps {
                 withCredentials([
@@ -302,12 +389,10 @@ SCRIPTEOF
                             exit 1
                         fi
 
-                        # انتظر الـ Lambda تكون active (Terraform أنشأها للتو)
                         aws lambda wait function-active \
                             --function-name novabank-${ENV}-db-init \
                             --region ${AWS_REGION}
 
-                        # ارفع الـ zip الجديد المبني بـ python3.12
                         aws lambda update-function-code \
                             --function-name novabank-${ENV}-db-init \
                             --zip-file fileb://$ZIP_PATH \
@@ -315,7 +400,6 @@ SCRIPTEOF
                             --query 'FunctionArn' \
                             --output text
 
-                        # انتظر الـ update يخلص قبل ما نكمل
                         aws lambda wait function-updated \
                             --function-name novabank-${ENV}-db-init \
                             --region ${AWS_REGION}
@@ -359,7 +443,7 @@ SCRIPTEOF
             }
         }
 
-        // ── 13. Init Database ──────────────────────────────────
+        // ── 14. Init Database ──────────────────────────────────
         stage('Init Database') {
             steps {
                 withCredentials([
@@ -368,14 +452,15 @@ SCRIPTEOF
                     sh '''
                         echo "=== Initializing Database ==="
 
-                        # انتظر الـ Lambda تكون active
                         aws lambda wait function-active \
                             --function-name novabank-dev-db-init \
                             --region ${AWS_REGION}
 
+                        rm -f /tmp/db-result.json
                         aws lambda invoke \
                             --function-name novabank-dev-db-init \
                             --region ${AWS_REGION} \
+                            --cli-read-timeout 300 --cli-connect-timeout 300 \
                             /tmp/db-result.json
 
                         cat /tmp/db-result.json
@@ -391,60 +476,176 @@ SCRIPTEOF
             }
         }
 
-        // ── 14. Deploy ECS Services ────────────────────────────
-        stage('Deploy ECS Services') {
+        // ── 15. Deploy K8s Manifests (namespaces/Deployments/Services/Ingress) ──
+        stage('Deploy K8s Manifests') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
                 ]) {
-                    sh '''
-                        echo "=== Redeploying ECS Services ==="
+                    sh '''#!/bin/bash
+                        set -e
+                        echo "=== Applying Kubernetes manifests ==="
+                        aws eks update-kubeconfig --name ${CLUSTER} --region ${AWS_REGION}
+
+                        # اسم الفولدر جوه k8s/ = اسم الـ service بالظبط (مش اسم الـ namespace)
+                        # namespace: بتحدده YAML نفسه (metadata.namespace) — matched بالفعل مع
+                        # الجدول: auth-service->auth, accounts-service->accounts, ...
                         SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
+
+                        if [ ! -d "k8s" ]; then
+                            echo "⚠️  فولدر k8s/ مش موجود في الريبو — الخطوة دي هتتخطى."
+                            exit 0
+                        fi
+
+                        export AWS_ACCOUNT_ID AWS_REGION CUSTOMER_DOMAIN TELLER_DOMAIN
+                        export IMAGE_TAG="${IMAGE_TAG}"
+
+                        RENDERED_DIR="/tmp/k8s-rendered-${BUILD_NUMBER}"
+                        rm -rf "$RENDERED_DIR" && mkdir -p "$RENDERED_DIR"
+
                         for svc in $SERVICES; do
-                            aws ecs update-service \
-                                --cluster ${CLUSTER} \
-                                --service novabank-dev-${svc} \
-                                --force-new-deployment \
-                                --region ${AWS_REGION} > /dev/null
-                            echo "  ↻ ${svc} redeployed"
+                            if [ -d "k8s/${svc}" ]; then
+                                mkdir -p "${RENDERED_DIR}/${svc}"
+                                for f in k8s/${svc}/*.yaml; do
+                                    envsubst < "$f" > "${RENDERED_DIR}/${svc}/$(basename "$f")"
+                                done
+                                kubectl apply -f "${RENDERED_DIR}/${svc}/"
+                                echo "  ✔ applied manifests for: ${svc}"
+                            else
+                                echo "  ⚠ k8s/${svc} not found — skipping"
+                            fi
                         done
-                        echo "✅ All services redeployed"
+
+                        rm -rf "$RENDERED_DIR"
+                        echo "✅ Manifests applied"
                     '''
                 }
             }
         }
 
-        // ── 15. Health Check ───────────────────────────────────
+        // ── 15b. Enable CloudFront (wire ALB DNS -> module.cloudfront) ──
+        // The ALB is created dynamically by the AWS Load Balancer Controller
+        // once the Ingress objects above exist — it doesn't exist at
+        // `Terraform Apply` time, so modules/cloudfront was skipped there
+        // (count = 0, see main.tf). Now that the Ingress exists, fetch the
+        // real ALB DNS name and run a second, targeted apply to turn the
+        // CloudFront distributions on.
+        stage('Enable CloudFront') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds'],
+                    file(credentialsId: 'terraform-tfvars-dev', variable: 'TFVARS_FILE')
+                ]) {
+                    sh '''#!/bin/bash
+                        echo "=== Waiting for the shared ALB to be provisioned ==="
+                        aws eks update-kubeconfig --name ${CLUSTER} --region ${AWS_REGION}
+
+                        ALB_DNS=""
+                        for i in $(seq 1 30); do
+                            ALB_DNS=$(kubectl get ingress -n api-gateway api-gateway-ingress \
+                                -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+                            if [ -n "$ALB_DNS" ]; then
+                                echo "  ALB DNS found: ${ALB_DNS}"
+                                break
+                            fi
+                            echo "  waiting for ALB Controller to provision the ALB... (${i}/30, ~5min max)"
+                            sleep 10
+                        done
+
+                        if [ -z "$ALB_DNS" ]; then
+                            echo "❌ ALB DNS not available after 5 minutes."
+                            echo "   CloudFront will stay disabled this run — check:"
+                            echo "     kubectl describe ingress -n api-gateway api-gateway-ingress"
+                            echo "     kubectl logs -n kube-system deploy/aws-load-balancer-controller"
+                            exit 1
+                        fi
+
+                        echo "=== Enabling CloudFront with ALB origin: ${ALB_DNS} ==="
+                        cd ${TF_DIR}
+                        rm -f terraform.tfvars && cp "$TFVARS_FILE" terraform.tfvars
+
+                        terraform apply \
+                            -var-file=terraform.tfvars \
+                            -var="image_tag=${IMAGE_TAG}" \
+                            -var="alb_origin_domain=${ALB_DNS}" \
+                            -target=module.cloudfront \
+                            -auto-approve
+
+                        echo "✅ CloudFront enabled"
+                    '''
+                }
+            }
+        }
+
+        // ── 16. Deploy Application Images to EKS ────────────────
+        stage('Deploy Application to EKS') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
+                ]) {
+                    sh '''#!/bin/bash
+                        echo "=== Rolling out application images to EKS ==="
+                        aws eks update-kubeconfig --name ${CLUSTER} --region ${AWS_REGION}
+
+                        declare -A NS_MAP=(
+                          [api-gateway]=api-gateway
+                          [auth-service]=auth
+                          [accounts-service]=accounts
+                          [transactions-service]=transactions
+                          [notifications-service]=notifications
+                          [frontend-customers]=frontend-customers
+                          [frontend-teller]=frontend-teller
+                        )
+
+                        for svc in "${!NS_MAP[@]}"; do
+                            ns="${NS_MAP[$svc]}"
+                            image="${REGISTRY}/novabank/${ENV}/${svc}:${IMAGE_TAG}"
+
+                            if kubectl get deployment "${svc}" -n "${ns}" &>/dev/null; then
+                                kubectl set image deployment/"${svc}" "${svc}=${image}" -n "${ns}" --record=true
+                                echo "  ↻ ${svc} (ns: ${ns}) -> ${IMAGE_TAG}"
+                            else
+                                echo "  ⚠ deployment/${svc} not found in namespace ${ns} — تأكد إن k8s manifests اتعملها apply قبل كده"
+                            fi
+                        done
+
+                        echo "✅ All services updated"
+                    '''
+                }
+            }
+        }
+
+        // ── 17. Health Check ────────────────────────────────────
         stage('Health Check') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']
                 ]) {
-                    sh '''
-                        echo "=== Waiting for services to be healthy ==="
-                        sleep 120
+                    sh '''#!/bin/bash
+                        echo "=== Waiting for rollouts to complete ==="
+                        aws eks update-kubeconfig --name ${CLUSTER} --region ${AWS_REGION}
 
-                        SERVICES="api-gateway auth-service accounts-service transactions-service notifications-service frontend-customers frontend-teller"
+                        declare -A NS_MAP=(
+                          [api-gateway]=api-gateway
+                          [auth-service]=auth
+                          [accounts-service]=accounts
+                          [transactions-service]=transactions
+                          [notifications-service]=notifications
+                          [frontend-customers]=frontend-customers
+                          [frontend-teller]=frontend-teller
+                        )
+
                         ALL_HEALTHY=true
-
-                        for svc in $SERVICES; do
-                            RUNNING=$(aws ecs describe-services \
-                                --cluster ${CLUSTER} \
-                                --services novabank-dev-${svc} \
-                                --region ${AWS_REGION} \
-                                --query 'services[0].runningCount' \
-                                --output text)
-                            DESIRED=$(aws ecs describe-services \
-                                --cluster ${CLUSTER} \
-                                --services novabank-dev-${svc} \
-                                --region ${AWS_REGION} \
-                                --query 'services[0].desiredCount' \
-                                --output text)
-
-                            if [ "$RUNNING" -ge "$DESIRED" ]; then
-                                echo "  ✅ ${svc}: ${RUNNING}/${DESIRED}"
+                        for svc in "${!NS_MAP[@]}"; do
+                            ns="${NS_MAP[$svc]}"
+                            if ! kubectl get deployment "${svc}" -n "${ns}" &>/dev/null; then
+                                echo "  ⚠ ${svc}: deployment not found in ${ns} — skipping health check"
+                                continue
+                            fi
+                            if kubectl rollout status deployment/"${svc}" -n "${ns}" --timeout=180s; then
+                                echo "  ✅ ${svc}: healthy"
                             else
-                                echo "  ❌ ${svc}: ${RUNNING}/${DESIRED}"
+                                echo "  ❌ ${svc}: rollout failed/timed out"
                                 ALL_HEALTHY=false
                             fi
                         done
