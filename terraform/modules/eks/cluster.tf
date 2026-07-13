@@ -46,6 +46,21 @@ resource "aws_security_group_rule" "cluster_ingress_nodes" {
   source_security_group_id = var.node_security_group_id
 }
 
+# Reciprocal rule: lets the control plane reach kubelet / webhook ports on
+# worker nodes (e.g. metrics-server, admission webhooks like the ALB
+# controller's). Declared here — not in modules/security-groups — because
+# this is the first place both the cluster SG and node SG IDs are available
+# without creating a circular module dependency.
+resource "aws_security_group_rule" "nodes_ingress_cluster" {
+  description              = "Allow the control plane to reach kubelet API / webhooks on worker nodes"
+  type                     = "ingress"
+  from_port                = 1025
+  to_port                  = 65535
+  protocol                 = "tcp"
+  security_group_id        = var.node_security_group_id
+  source_security_group_id = aws_security_group.eks_cluster.id
+}
+
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
   role_arn = var.cluster_role_arn
