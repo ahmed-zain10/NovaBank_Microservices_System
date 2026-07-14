@@ -338,7 +338,7 @@ except:
 
                             aws rds delete-db-instance                                 --db-instance-identifier novabank-${ENV}-rds                                 --skip-final-snapshot                                 --region ${AWS_REGION} > /dev/null 2>&1 && echo "  Deleting RDS..." || true
 
-                            ALB_ARN=$(aws elbv2 describe-load-balancers --region ${AWS_REGION}                                 --query "LoadBalancers[?contains(LoadBalancerName,\`novabank\`)].LoadBalancerArn"                                 --output text 2>/dev/null)
+                            ALB_ARN=$(aws elbv2 describe-load-balancers --region ${AWS_REGION}                                 --query "LoadBalancers[?contains(LoadBalancerName,`novabank`)].LoadBalancerArn"                                 --output text 2>/dev/null)
                             [ -n "$ALB_ARN" ] && aws elbv2 delete-load-balancer                                 --load-balancer-arn $ALB_ARN --region ${AWS_REGION} > /dev/null 2>&1 &&                                 echo "  Deleted ALB" || true
 
                             aws lambda delete-function --function-name novabank-${ENV}-db-init                                 --region ${AWS_REGION} > /dev/null 2>&1 && echo "  Deleted Lambda" || true
