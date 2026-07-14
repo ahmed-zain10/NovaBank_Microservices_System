@@ -258,7 +258,7 @@ for schema in schemas:
     except json.JSONDecodeError:
         # Handle non-quoted format: {key:value,key:value}
         current = {}
-        for match in re.finditer(r'(\w+):([^,}]+)', raw):
+        for match in re.finditer(r'(\\w+):([^,}]+)', raw):
             current[match.group(1)] = match.group(2).strip()
 
     # Fix dbname and schema
