@@ -1,43 +1,40 @@
-############################################
-# modules/vpc/variables.tf
-############################################
+variable "aws_region" {
+  type        = string
+  description = "AWS region"
+}
 
-variable "environment" {
-  description = "Environment name (e.g. dev, prod)"
+variable "project" {
+  description = "Project name prefix (e.g. novabank)"
   type        = string
 }
 
-variable "cluster_name" {
-  description = "EKS cluster name, used to tag subnets for auto-discovery by EKS and the AWS Load Balancer Controller"
+variable "env" {
+  description = "Environment (dev | prod)"
   type        = string
 }
 
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"
   type        = string
-  default     = "10.20.0.0/16"
 }
 
-variable "az_count" {
-  description = "Number of availability zones to spread subnets across (2 for dev, 3 for prod)"
-  type        = number
-  default     = 2
+variable "azs" {
+  description = "List of availability zones to use"
+  type        = list(string)
 }
 
-variable "single_nat_gateway" {
-  description = "Use a single shared NAT Gateway (cheaper, dev) instead of one per AZ (HA, prod)"
-  type        = bool
-  default     = true
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for public subnets (one per AZ)"
+  type        = list(string)
 }
 
-variable "flow_log_retention_days" {
-  description = "CloudWatch log retention for VPC Flow Logs"
-  type        = number
-  default     = 14
+variable "private_subnet_cidrs" {
+  description = "CIDR blocks for private subnets (one per AZ)"
+  type        = list(string)
 }
 
 variable "tags" {
-  description = "Common tags applied to all resources in this module"
+  description = "Common tags to apply to all resources"
   type        = map(string)
   default     = {}
 }

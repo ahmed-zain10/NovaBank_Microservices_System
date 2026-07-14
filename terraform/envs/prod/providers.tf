@@ -1,7 +1,3 @@
-############################################
-# envs/prod/providers.tf
-############################################
-
 terraform {
   required_version = ">= 1.7.0"
 
@@ -14,27 +10,14 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 2.31"
-    }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.14"
-    }
   }
 
   backend "s3" {
-    # Filled in via -backend-config, or hardcode after bootstrap_state.sh:
-    # bucket         = "novabank-terraform-state-prod"
-    # key            = "prod/terraform.tfstate"
-    # region         = "eu-west-1"
-    # dynamodb_table = "novabank-terraform-locks-prod"
-    # encrypt        = true
+    bucket         = "novabank-terraform-state-prod"
+    key            = "prod/terraform.tfstate"
+    region         = "eu-west-1"
+    encrypt        = true
+    dynamodb_table = "novabank-terraform-locks-prod"
   }
 }
 
@@ -42,39 +25,23 @@ provider "aws" {
   region = var.aws_region
 
   default_tags {
-    tags = local.common_tags
+    tags = {
+      Project     = "novabank"
+      Environment = "prod"
+      ManagedBy   = "terraform"
+    }
   }
 }
 
-# CLOUDFRONT-scope WAFv2 Web ACLs (modules/waf) must be created in
-# us-east-1 regardless of the main region — same rule as ACM certs
-# used by CloudFront.
 provider "aws" {
   alias  = "us_east_1"
   region = "us-east-1"
 
   default_tags {
-    tags = local.common_tags
-  }
-}
-
-# Used to authenticate the kubernetes/helm providers against the EKS cluster
-# created by module.eks in this same apply. Requires the cluster to already
-# exist, hence the two-pass apply described in the README.
-data "aws_eks_cluster_auth" "this" {
-  name = module.eks.cluster_name
-}
-
-provider "kubernetes" {
-  host                   = module.eks.cluster_endpoint
-  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-  token                  = data.aws_eks_cluster_auth.this.token
-}
-
-provider "helm" {
-  kubernetes {
-    host                   = module.eks.cluster_endpoint
-    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-    token                  = data.aws_eks_cluster_auth.this.token
+    tags = {
+      Project     = "novabank"
+      Environment = "prod"
+      ManagedBy   = "terraform"
+    }
   }
 }

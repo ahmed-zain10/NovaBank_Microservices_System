@@ -1,314 +1,204 @@
-############################################
-# envs/dev/main.tf
-############################################
+###############################################################################
+# NovaBank – Prod Environment – Main
+# Same modules as dev but with production-grade sizing & HA settings.
+###############################################################################
 
 locals {
-  environment = "prod"
-  cluster_name = var.cluster_name
+  project = "novabank"
+  env     = "prod"
 
   common_tags = {
-    Project     = "novabank"
-    Environment = local.environment
+    Project     = local.project
+    Environment = local.env
     ManagedBy   = "terraform"
-  }
-
-  # Per-microservice metadata used to wire IRSA roles <-> namespaces <-> service accounts
-  # consistently across modules.iam_eks_irsa and modules.kubernetes.
-  microservices = {
-    "auth-service" = {
-      namespace       = "auth"
-      service_account = "auth-service-sa"
-    }
-    "accounts-service" = {
-      namespace       = "accounts"
-      service_account = "accounts-service-sa"
-    }
-    "transactions-service" = {
-      namespace       = "transactions"
-      service_account = "transactions-service-sa"
-    }
-    "notifications-service" = {
-      namespace       = "notifications"
-      service_account = "notifications-service-sa"
-    }
+    Owner       = var.owner
   }
 }
 
-############################################
-# 1) Networking
-############################################
+resource "aws_kms_key" "main" {
+  description             = "NovaBank ${local.env} encryption key"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  tags                    = local.common_tags
+}
+
+resource "aws_kms_alias" "main" {
+  name          = "alias/${local.project}-${local.env}"
+  target_key_id = aws_kms_key.main.key_id
+}
+
+module "secrets" {
+  source              = "../../modules/secrets"
+  project             = local.project
+  env                 = local.env
+  rds_master_username = var.rds_master_username
+  tags                = local.common_tags
+}
 
 module "vpc" {
-  source = "../../modules/vpc"
-
-  environment        = local.environment
-  cluster_name       = local.cluster_name
-  vpc_cidr           = var.vpc_cidr
-  az_count           = var.az_count
-  single_nat_gateway = var.single_nat_gateway
-
-  tags = local.common_tags
+  source               = "../../modules/vpc"
+  project              = local.project
+  env                  = local.env
+  vpc_cidr             = var.vpc_cidr
+  azs                  = var.azs
+  public_subnet_cidrs  = var.public_subnet_cidrs
+  private_subnet_cidrs = var.private_subnet_cidrs
+  tags                 = local.common_tags
 }
 
 module "security_groups" {
-  source = "../../modules/security-groups"
-
-  environment  = local.environment
-  cluster_name = local.cluster_name
-  vpc_id       = module.vpc.vpc_id
-  vpc_cidr     = var.vpc_cidr
-
-  tags = local.common_tags
-}
-
-############################################
-# 2) Data layer
-############################################
-
-module "secrets" {
-  source = "../../modules/secrets"
-
-  environment = local.environment
-  tags        = local.common_tags
+  source                  = "../../modules/security-groups"
+  project                 = local.project
+  env                     = local.env
+  vpc_id                  = module.vpc.vpc_id
+  vpc_cidr                = module.vpc.vpc_cidr
+  aws_region              = var.aws_region
+  private_subnet_ids      = module.vpc.private_subnet_ids
+  private_route_table_ids = module.vpc.private_route_table_ids
+  tags                    = local.common_tags
 }
 
 module "ecr" {
-  source = "../../modules/ecr"
-
-  environment = local.environment
-  tags        = local.common_tags
+  source                    = "../../modules/ecr"
+  project                   = local.project
+  env                       = local.env
+  kms_key_arn               = aws_kms_key.main.arn
+  ecr_image_retention_count = 20
+  tags                      = local.common_tags
 }
 
 module "rds" {
-  source = "../../modules/rds"
-
-  environment           = local.environment
-  vpc_id                = module.vpc.vpc_id
-  subnet_ids            = module.vpc.private_subnet_ids
-  security_group_id     = module.security_groups.rds_security_group_id
-  instance_class        = var.rds_instance_class
-  multi_az              = var.rds_multi_az
-  backup_retention_days = var.rds_backup_retention_days
-  deletion_protection   = var.rds_deletion_protection
-  db_credentials_secret_arn = module.secrets.db_credentials_secret_arn
-
-  tags = local.common_tags
+  source                   = "../../modules/rds"
+  project                  = local.project
+  env                      = local.env
+  private_subnet_ids       = module.vpc.private_subnet_ids
+  rds_sg_id                = module.security_groups.rds_sg_id
+  kms_key_arn              = aws_kms_key.main.arn
+  rds_master_username      = var.rds_master_username
+  rds_master_password      = module.secrets.rds_master_password
+  rds_master_secret_arn    = module.secrets.rds_master_secret_arn
+  schema_secret_arns       = module.secrets.schema_secret_arns
+  db_instance_class        = var.db_instance_class   # e.g. db.t3.medium in prod
+  db_allocated_storage     = 50
+  db_max_allocated_storage = 500
+  tags                     = local.common_tags
 }
 
-############################################
-# 3) IAM — base roles (no OIDC dependency yet)
-############################################
-
-module "iam_eks_base" {
-  source = "../../modules/iam-eks"
-
-  cluster_name        = local.cluster_name
-  enable_ssm_on_nodes  = true
-  irsa_roles          = {} # populated later by module.iam_eks_irsa, after OIDC exists
-
-  tags = local.common_tags
+module "alb" {
+  source              = "../../modules/alb"
+  project             = local.project
+  env                 = local.env
+  vpc_id              = module.vpc.vpc_id
+  public_subnet_ids   = module.vpc.public_subnet_ids
+  alb_sg_id           = module.security_groups.alb_sg_id
+  acm_certificate_arn = var.acm_certificate_arn
+  aws_account_id      = data.aws_caller_identity.current.account_id
+  aws_region          = var.aws_region
+  alb_account_id      = var.alb_account_id
+  tags                = local.common_tags
 }
-
-############################################
-# 4) EKS control plane
-############################################
-
-module "eks" {
-  source = "../../modules/eks"
-
-  cluster_name            = local.cluster_name
-  kubernetes_version      = var.kubernetes_version
-  cluster_role_arn        = module.iam_eks_base.cluster_role_arn
-  vpc_id                  = module.vpc.vpc_id
-  subnet_ids              = module.vpc.private_subnet_ids
-  node_security_group_id  = module.security_groups.eks_node_security_group_id
-  endpoint_private_access = true
-  endpoint_public_access  = var.eks_endpoint_public_access
-  public_access_cidrs     = var.eks_public_access_cidrs
-  log_retention_days      = var.log_retention_days
-  kms_key_arn             = module.secrets.kms_key_arn
-
-  tags = local.common_tags
-}
-
-############################################
-# 5) OIDC provider (bridges eks -> iam-eks IRSA)
-############################################
-
-module "oidc" {
-  source = "../../modules/oidc"
-
-  cluster_name            = local.cluster_name
-  cluster_oidc_issuer_url = module.eks.cluster_oidc_issuer_url
-
-  tags = local.common_tags
-}
-
-############################################
-# 6) IAM — IRSA roles, now that OIDC exists
-############################################
-
-module "iam_eks_irsa" {
-  source = "../../modules/iam-eks"
-
-  cluster_name      = "${local.cluster_name}-irsa"
-  oidc_provider_arn = module.oidc.oidc_provider_arn
-  oidc_provider_url = module.oidc.oidc_provider_url
-
-  irsa_roles = {
-    for svc, cfg in local.microservices : svc => {
-      namespace          = cfg.namespace
-      service_account    = cfg.service_account
-      policy_arns        = []
-      inline_policy_json = jsonencode({
-        Version = "2012-10-17"
-        Statement = [{
-          Effect   = "Allow"
-          Action   = ["secretsmanager:GetSecretValue"]
-          Resource = module.secrets.service_secret_arns[svc]
-        }]
-      })
-    }
-  }
-
-  tags = local.common_tags
-}
-
-############################################
-# 7) Worker nodes
-############################################
-
-module "eks_nodegroup" {
-  source = "../../modules/eks-nodegroup"
-
-  cluster_name                        = module.eks.cluster_name
-  cluster_endpoint                    = module.eks.cluster_endpoint
-  cluster_certificate_authority_data  = module.eks.cluster_certificate_authority_data
-  kubernetes_version                  = var.kubernetes_version
-  nodegroup_name                      = "general"
-
-  node_role_arn           = module.iam_eks_base.node_role_arn
-  node_security_group_id  = module.security_groups.eks_node_security_group_id
-  subnet_ids              = module.vpc.private_subnet_ids
-  kms_key_arn             = module.secrets.kms_key_arn
-
-  capacity_type  = var.node_capacity_type
-  instance_types = var.node_instance_types
-  disk_size      = var.node_disk_size
-
-  min_size     = var.node_min_size
-  max_size     = var.node_max_size
-  desired_size = var.node_desired_size
-
-  tags = local.common_tags
-}
-
-############################################
-# 8) EKS Add-ons
-############################################
-
-module "addons" {
-  source = "../../modules/addons"
-
-  cluster_name           = module.eks.cluster_name
-  oidc_provider_arn      = module.oidc.oidc_provider_arn
-  oidc_provider_url      = module.oidc.oidc_provider_url
-  node_group_dependency  = module.eks_nodegroup.node_group_id
-
-  enable_ebs_csi_driver = true
-
-  tags = local.common_tags
-}
-
-############################################
-# 9) Helm releases (ALB Controller, autoscaler, external-dns)
-############################################
-
-module "helm" {
-  source = "../../modules/helm"
-
-  cluster_name      = module.eks.cluster_name
-  aws_region        = var.aws_region
-  vpc_id            = module.vpc.vpc_id
-  oidc_provider_arn = module.oidc.oidc_provider_arn
-  oidc_provider_url = module.oidc.oidc_provider_url
-
-  enable_cluster_autoscaler = true
-  enable_external_dns       = var.enable_external_dns
-  hosted_zone_name          = var.hosted_zone_name
-
-  tags = local.common_tags
-
-  depends_on = [module.addons]
-}
-
-############################################
-# 10) Kubernetes-level objects (namespaces, service accounts, quotas)
-############################################
-
-module "kubernetes" {
-  source = "../../modules/kubernetes"
-
-  environment = local.environment
-
-  namespaces = {
-    "api-gateway"        = {}
-    "auth"               = {}
-    "accounts"           = {}
-    "transactions"       = {}
-    "notifications"      = {}
-    "frontend-customers" = {}
-    "frontend-teller"    = {}
-  }
-
-  service_accounts = {
-    for svc, cfg in local.microservices : svc => {
-      name          = cfg.service_account
-      namespace     = cfg.namespace
-      irsa_role_arn = module.iam_eks_irsa.irsa_role_arns[svc]
-    }
-  }
-
-  enable_default_deny_network_policy = true
-
-  depends_on = [module.eks_nodegroup]
-}
-
-############################################
-# 11) Edge — WAF + CloudFront (in front of the ALB
-#     that module.helm's ALB Controller provisions
-#     dynamically once Ingress objects are applied)
-############################################
 
 module "waf" {
   source = "../../modules/waf"
-
   providers = {
-    aws = aws.us_east_1
+    aws.us_east_1 = aws.us_east_1
   }
-
-  environment         = local.environment
+  project             = local.project
+  env                 = local.env
   teller_allowed_ips  = var.teller_allowed_ips
+  customer_rate_limit = 3000
+  teller_rate_limit   = 500
+  tags                = local.common_tags
+}
+
+module "cloudfront" {
+  source                        = "../../modules/cloudfront"
+  project                       = local.project
+  env                           = local.env
+  alb_dns_name                  = module.alb.alb_dns_name
+  customer_domain               = var.customer_domain
+  teller_domain                 = var.teller_domain
+  acm_certificate_arn_us_east_1 = var.acm_certificate_arn_us_east_1
+  customers_waf_arn             = module.waf.customers_waf_arn
+  teller_waf_arn                = module.waf.teller_waf_arn
+  cloudfront_secret_token       = random_password.cf_secret.result
+  cf_logs_bucket                = "${local.project}-${local.env}-cf-logs-${data.aws_caller_identity.current.account_id}"
+  cf_price_class                = "PriceClass_All"
+  teller_allowed_countries      = var.teller_allowed_countries
+  tags                          = local.common_tags
+}
+
+module "ecs" {
+  source             = "../../modules/ecs"
+  project            = local.project
+  env                = local.env
+  aws_region         = var.aws_region
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+  ecs_sg_id          = module.security_groups.ecs_sg_id
+  ecs_teller_sg_id   = module.security_groups.ecs_teller_sg_id
+  ecr_repo_urls      = module.ecr.repository_urls
+  image_tag          = var.image_tag
+  rds_address        = module.rds.rds_address
+  schema_secret_arns = module.secrets.schema_secret_arns
+  jwt_secret_arn     = module.secrets.jwt_secret_arn
+
+  all_secret_arns = concat(
+    values(module.secrets.schema_secret_arns),
+    [module.secrets.jwt_secret_arn, module.secrets.rds_master_secret_arn]
+  )
+
+  tg_api_gateway_arn        = module.alb.tg_api_gateway_arn
+  tg_frontend_customers_arn = module.alb.tg_frontend_customers_arn
+  tg_frontend_teller_arn    = module.alb.tg_frontend_teller_arn
+  domain_name               = var.customer_domain
+  customer_domain           = var.customer_domain
+  teller_domain             = var.teller_domain
+
+  # Prod: larger, 2+ replicas, on-demand Fargate
+  svc_cpu           = 512
+  svc_memory        = 1024
+  gw_cpu            = 1024
+  gw_memory         = 2048
+  fe_cpu            = 256
+  fe_memory         = 512
+  svc_desired_count = 2
+  fe_desired_count  = 2
+  max_capacity      = 10
 
   tags = local.common_tags
 }
 
-module "cloudfront" {
-  source = "../../modules/cloudfront"
+resource "random_password" "cf_secret" {
+  length  = 32
+  special = false
+}
 
-  environment                    = local.environment
-  customer_domain                = var.customer_domain
-  teller_domain                  = var.teller_domain
-  hosted_zone_name               = var.hosted_zone_name
-  acm_certificate_arn_us_east_1  = var.acm_certificate_arn_us_east_1
-  waf_customer_acl_arn           = module.waf.customer_web_acl_arn
-  waf_teller_acl_arn             = module.waf.teller_web_acl_arn
+data "aws_caller_identity" "current" {}
 
-  # NOTE: the ALB origin domain isn't known until the AWS Load Balancer
-  # Controller creates it from an Ingress (post-apply, out of band).
-  # Set this manually after Step 9 in the README, or wire it via a
-  # `data "kubernetes_ingress_v1"` lookup once the Ingress exists.
-  alb_origin_domain = var.alb_origin_domain
+data "aws_route53_zone" "main" {
+  name         = var.hosted_zone_name
+  private_zone = false
+}
 
-  tags = local.common_tags
+resource "aws_route53_record" "customers" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = var.customer_domain
+  type    = "A"
+  alias {
+    name                   = module.cloudfront.customers_domain_name
+    zone_id                = "Z2FDTNDATAQYW2"
+    evaluate_target_health = false
+  }
+}
+
+resource "aws_route53_record" "teller" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = var.teller_domain
+  type    = "A"
+  alias {
+    name                   = module.cloudfront.teller_domain_name
+    zone_id                = "Z2FDTNDATAQYW2"
+    evaluate_target_health = false
+  }
 }

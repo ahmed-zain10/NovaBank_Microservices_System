@@ -1,9 +1,3 @@
-############################################
-# envs/dev/outputs.tf
-############################################
-
-data "aws_caller_identity" "current" {}
-
 output "customer_portal_url" {
   description = "Customer portal URL"
   value       = "https://${var.customer_domain}"
@@ -14,14 +8,9 @@ output "teller_portal_url" {
   value       = "https://${var.teller_domain}"
 }
 
-output "eks_cluster_name" {
-  description = "EKS cluster name"
-  value       = module.eks.cluster_name
-}
-
-output "eks_cluster_endpoint" {
-  description = "EKS API server endpoint"
-  value       = module.eks.cluster_endpoint
+output "alb_dns_name" {
+  description = "ALB DNS (do not use directly — always go through CloudFront)"
+  value       = module.alb.alb_dns_name
 }
 
 output "rds_endpoint" {
@@ -35,9 +24,13 @@ output "ecr_repositories" {
   value       = module.ecr.repository_urls
 }
 
+output "ecs_cluster_name" {
+  value = module.ecs.cluster_name
+}
+
 output "cloudwatch_log_groups" {
   description = "Log group prefix for all services"
-  value       = "/novabank/${local.environment}/<service-name>"
+  value       = "/novabank/${local.env}/<service-name>"
 }
 
 output "next_steps" {
@@ -45,23 +38,17 @@ output "next_steps" {
     ✅ Infrastructure deployed!
 
     Next steps:
-    1. Point kubectl at the cluster:
-       ./scripts/update_kubeconfig.sh dev ${var.aws_region}
-
-    2. Build & push Docker images:
+    1. Build & push Docker images:
        cd ../../ && ./scripts/push_images.sh dev ${var.aws_region} ${data.aws_caller_identity.current.account_id}
 
-    3. Apply your application Kubernetes manifests (Deployments/Services/Ingress):
-       kubectl apply -f k8s/ -n <namespace>
-
-    4. Run DB schema init (Lambda):
+    2. Run DB schema init (Lambda):
        aws lambda invoke --function-name novabank-dev-db-init /tmp/out.json
 
-    5. Access your app:
+    3. Access your app:
        Customer Portal: https://${var.customer_domain}
        Teller Portal:   https://${var.teller_domain}
 
-    6. View logs:
-       kubectl logs -n api-gateway deploy/api-gateway --follow
+    4. View logs:
+       aws logs tail /novabank/dev/api-gateway --follow
   EOT
 }
