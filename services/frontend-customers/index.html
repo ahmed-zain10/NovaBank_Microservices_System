@@ -2171,7 +2171,8 @@
         color: rgba(10, 15, 30, 0.7);
       }
       .chat-messages {
-        height: 200px;
+        /* height: 90%;*/
+        height: 345px;
         overflow-y: auto;
         padding: 1rem;
         display: flex;
@@ -4130,9 +4131,12 @@
       };
 
       async function apiCall(method, path, body = null) {
-        const headers = { "Content-Type": "application/json" };
+        const headers = {
+          "Content-Type": "application/json",
+        };
         const t = TOKEN.get();
         if (t) headers["Authorization"] = "Bearer " + t;
+
         const opts = { method, headers };
         if (body) opts.body = JSON.stringify(body);
         const url = path.startsWith("http") ? path : API + path;
@@ -5631,52 +5635,78 @@
 
       async function sendChatMsg() {
         const input = document.getElementById("chatInput");
+        const sendBtn = document.querySelector(".chat-send");
         const msg = input.value.trim();
 
         if (!msg) return;
 
         const msgs = document.getElementById("chatMessages");
 
-        msgs.innerHTML += `
-    <div class="chat-msg user">
-        ${msg}
-    </div>`;
+        // Escape عشان نمنع XSS
+        function escapeHtml(str) {
+          const div = document.createElement("div");
+          div.textContent = str;
+          return div.innerHTML;
+        }
+
+        // إضافة رسالة المستخدم بأمان
+        appendMessage(msgs, msg, "user");
 
         input.value = "";
+        msgs.scrollTop = msgs.scrollHeight;
+
+        // تعطيل حقل الإدخال وزر الإرسال
+        input.disabled = true;
+        if (sendBtn) sendBtn.disabled = true;
+
+        try {
+          const user =
+            typeof DB !== "undefined" && DB.currentUser ? DB.currentUser : {};
+
+          const payload = {
+            id: user.nid || user.national_id || 1,
+            num: user.phone || user.phone_number || "unknown",
+            name: user.first_name || user.name || "زائر",
+            email: user.email || "unknown",
+            message: msg,
+          };
+
+          const resp = await apiCall(
+            "POST",
+            "https://n8nnour.app.n8n.cloud/webhook/bank",
+            payload,
+          );
+
+          let replyText = resp && resp.reply;
+
+          if (!replyText) {
+            replyText =
+              "عذراً، لم يتمكن النظام من الرد حالياً. يرجى المحاولة لاحقاً.";
+          }
+
+          console.log("Chatbot response:", resp);
+          appendMessage(msgs, replyText, "bot");
+        } catch (e) {
+          console.error(e);
+          appendMessage(
+            msgs,
+            "عذراً، حدث خطأ في الرد. يرجى المحاولة لاحقاً.",
+            "bot",
+          );
+        } finally {
+          // إعادة تفعيل حقل الإدخال وزر الإرسال
+          input.disabled = false;
+          if (sendBtn) sendBtn.disabled = false;
+          input.focus();
+        }
 
         msgs.scrollTop = msgs.scrollHeight;
 
-        try {
-          const resp = await apiCall(
-            "POST",
-            // "https://n8ncourse.nourn8n.cfd/webhook-test/bank",
-            "https://n8ncourse.nourn8n.cfd/webhook/bank",
-            {
-              id: 1500,
-              phone: "01000000",
-              name: "Ahmed",
-              email: "esam43690@gmail.com",
-              message: msg,
-            },
-          );
-
-          console.log("Chatbot response:", resp);
-
-          msgs.innerHTML += `
-        <div class="chat-msg bot">
-            ${resp.reply}
-        </div>
-    `;
-
-          msgs.scrollTop = msgs.scrollHeight;
-        } catch (e) {
-          console.error(e);
-
-          msgs.innerHTML += `
-        <div class="chat-msg bot">
-            عذراً، حدث خطأ في الرد. يرجى المحاولة لاحقاً.
-        </div>
-    `;
+        function appendMessage(container, text, type) {
+          const div = document.createElement("div");
+          div.className = `chat-msg ${type}`;
+          div.textContent = text; // بيمنع الـ XSS تلقائيًا لأنه مش بيفسر HTML
+          container.appendChild(div);
         }
       }
 
