@@ -16,6 +16,10 @@ ACCOUNTS_URL      = os.getenv("ACCOUNTS_URL",      "http://accounts-service:8002
 TRANSACTIONS_URL  = os.getenv("TRANSACTIONS_URL",  "http://transactions-service:8003")
 NOTIFICATIONS_URL = os.getenv("NOTIFICATIONS_URL", "http://notifications-service:8004")
 
+# External n8n chatbot webhook — proxied server-to-server to avoid browser CORS
+# restrictions, since the n8n instance is a third-party service we don't control.
+N8N_CHAT_WEBHOOK_URL = os.getenv("N8N_CHAT_WEBHOOK_URL", "https://n8ncourse.nourn8n.cfd/webhook/bank")
+
 logging.basicConfig(level=logging.INFO,
   format='{"t":"%(asctime)s","svc":"gateway","msg":"%(message)s"}')
 log = logging.getLogger(__name__)
@@ -140,6 +144,30 @@ async def forgot(request: Request):
 @app.get("/api/transactions/rates")
 async def rates(request: Request):
     return await proxy(request, TRANSACTIONS_URL, "/transactions/rates")
+
+# ── CHATBOT (n8n proxy) ────────────────────────────────────────────────
+@app.post("/api/bank-chat")
+async def bank_chat(request: Request, _=Depends(require_auth)):
+    """Proxy لخدمة الشات بوت الخارجية (n8n) — بيتجنب مشكلة CORS
+    لأن المتصفح بيكلم نفس الـ origin (api-gateway)، والـ gateway هو اللي
+    بيكلم n8n من السيرفر (server-to-server، مفيش قيود CORS هناك)."""
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                N8N_CHAT_WEBHOOK_URL,
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+        try:
+            content = r.json()
+        except Exception:
+            content = {"detail": r.text}
+        return JSONResponse(content=content, status_code=r.status_code)
+    except httpx.ConnectError:
+        raise HTTPException(503, "خدمة الدردشة غير متاحة حاليًا")
+    except httpx.TimeoutException:
+        raise HTTPException(504, "انتهت مهلة الاتصال بخدمة الدردشة")
 
 # ── AUTH (protected) ──────────────────────────────────────────────────
 @app.post("/api/auth/logout")

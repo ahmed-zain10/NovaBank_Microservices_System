@@ -5671,11 +5671,7 @@
             message: msg,
           };
 
-          const resp = await apiCall(
-            "POST",
-            "https://n8nnour.app.n8n.cloud/webhook/bank",
-            payload,
-          );
+          const resp = await apiCall("POST", "/api/chatbot", payload);
 
           let replyText = resp && resp.reply;
 
